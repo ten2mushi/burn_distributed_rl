@@ -33,7 +33,7 @@ use burn::tensor::activation::relu;
 use burn::tensor::Tensor;
 
 use distributed_rl::algorithms::action_policy::{DiscretePolicy, DiscretePolicyOutput};
-use distributed_rl::algorithms::actor_critic::{ActorCritic, ForwardOutput};
+use distributed_rl::algorithms::actor_critic::{ActorCritic, ActorCriticInference, ForwardOutput};
 use distributed_rl::algorithms::temporal_policy::FeedForward;
 use distributed_rl::environment::CartPoleEnv;
 use distributed_rl::runners::{DistributedIMPALAConfig, DistributedIMPALADiscrete};
@@ -79,15 +79,19 @@ impl<B: burn::tensor::backend::Backend> IMPALANet<B> {
 }
 
 // ============================================================================
-// ActorCritic Implementation
+// ActorCriticInference Implementation - For ANY Backend (including Inner)
 // ============================================================================
 
-impl ActorCritic<B, DiscretePolicy, FeedForward> for IMPALANet<B> {
+/// Implement inference trait for any Backend.
+/// This allows the model to run on both Autodiff<Wgpu> (learner) and Wgpu (actors).
+impl<Backend: burn::tensor::backend::Backend> ActorCriticInference<Backend, DiscretePolicy, FeedForward>
+    for IMPALANet<Backend>
+{
     fn forward(
         &self,
-        obs: Tensor<B, 2>,
+        obs: Tensor<Backend, 2>,
         _hidden: (),
-    ) -> ForwardOutput<B, DiscretePolicy, FeedForward> {
+    ) -> ForwardOutput<Backend, DiscretePolicy, FeedForward> {
         let (logits, values) = self.forward_net(obs);
         ForwardOutput::new(DiscretePolicyOutput { logits }, values, ())
     }
@@ -103,6 +107,17 @@ impl ActorCritic<B, DiscretePolicy, FeedForward> for IMPALANet<B> {
     fn temporal_policy(&self) -> FeedForward {
         FeedForward::new()
     }
+}
+
+// ============================================================================
+// ActorCritic Implementation - For AutodiffBackend (Training)
+// ============================================================================
+
+/// Implement training trait for AutodiffBackend.
+/// This marker trait enables gradient computation on the learner thread.
+impl ActorCritic<B, DiscretePolicy, FeedForward> for IMPALANet<B> {
+    // Training methods inherited from ActorCriticInference.
+    // Currently empty - this is a marker trait that adds AutodiffModule bound.
 }
 
 // ============================================================================

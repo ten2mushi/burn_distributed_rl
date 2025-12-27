@@ -26,7 +26,7 @@ use burn::tensor::activation::relu;
 use burn::tensor::Tensor;
 
 use distributed_rl::algorithms::action_policy::{DiscretePolicy, DiscretePolicyOutput};
-use distributed_rl::algorithms::actor_critic::{ActorCritic, ForwardOutput};
+use distributed_rl::algorithms::actor_critic::{ActorCritic, ActorCriticInference, ForwardOutput};
 use distributed_rl::algorithms::temporal_policy::FeedForward;
 use distributed_rl::environment::CartPoleEnv;
 use distributed_rl::runners::{DistributedPPOConfig, DistributedPPODiscrete};
@@ -72,15 +72,17 @@ impl<B: burn::tensor::backend::Backend> PPONet<B> {
 }
 
 // ============================================================================
-// ActorCritic Implementation
+// ActorCriticInference Implementation - For ANY Backend (including Inner)
 // ============================================================================
 
-impl ActorCritic<B, DiscretePolicy, FeedForward> for PPONet<B> {
+impl<Backend: burn::tensor::backend::Backend> ActorCriticInference<Backend, DiscretePolicy, FeedForward>
+    for PPONet<Backend>
+{
     fn forward(
         &self,
-        obs: Tensor<B, 2>,
+        obs: Tensor<Backend, 2>,
         _hidden: (),
-    ) -> ForwardOutput<B, DiscretePolicy, FeedForward> {
+    ) -> ForwardOutput<Backend, DiscretePolicy, FeedForward> {
         let (logits, values) = self.forward_net(obs);
         ForwardOutput::new(DiscretePolicyOutput { logits }, values, ())
     }
@@ -97,6 +99,12 @@ impl ActorCritic<B, DiscretePolicy, FeedForward> for PPONet<B> {
         FeedForward::new()
     }
 }
+
+// ============================================================================
+// ActorCritic Implementation - For AutodiffBackend (Training)
+// ============================================================================
+
+impl ActorCritic<B, DiscretePolicy, FeedForward> for PPONet<B> {}
 
 // ============================================================================
 // Training Entry Point

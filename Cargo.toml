@@ -2,7 +2,11 @@
 resolver = "2"
 
 members = [
-    "distributed_rl", "examples"
+    "distributed_rl",
+    "examples",
+    "operant_fork/operant/crates/operant",
+    "operant_fork/operant/crates/operant-core",
+    "operant_fork/operant/crates/operant-envs"
 ]
 
 [workspace.dependencies]

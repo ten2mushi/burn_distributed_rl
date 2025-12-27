@@ -1,0 +1,93 @@
+name: Publish to PyPI
+
+on:
+  # Manual trigger for TestPyPI
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Publish target'
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: 'testpypi'
+
+  # Automatic trigger for production PyPI
+  release:
+    types: [published]
+
+permissions:
+  id-token: write  # CRITICAL: Required for trusted publishing
+  contents: read
+
+jobs:
+  build-wheels:
+    name: Build wheels on ${{ matrix.platform.os }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - { os: "linux", runner: "ubuntu-latest" }
+          - { os: "macos", runner: "macos-latest" }
+          - { os: "windows", runner: "windows-latest" }
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          manylinux: auto
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.python-version }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish to ${{ github.event.inputs.target || 'pypi' }}
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.target || 'pypi' }}
+      url: ${{ steps.set-url.outputs.url }}
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List distributions
+        run: ls -lh dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ github.event.inputs.target == 'testpypi' && 'https://test.pypi.org/legacy/' || '' }}
+          verbose: true
+
+      - name: Set package URL
+        id: set-url
+        run: |
+          if [ "${{ github.event.inputs.target }}" == "testpypi" ]; then
+            echo "url=https://test.pypi.org/project/operant/" >> $GITHUB_OUTPUT
+          else
+            echo "url=https://pypi.org/project/operant/" >> $GITHUB_OUTPUT
+          fi

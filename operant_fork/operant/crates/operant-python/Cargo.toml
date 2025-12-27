@@ -1,0 +1,29 @@
+[package]
+name = "operant-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Python bindings for Operant RL library"
+
+[lib]
+name = "operant"
+crate-type = ["cdylib"]
+
+[features]
+default = ["simd"]
+simd = ["operant-envs/simd"]        # Pass through to operant-envs
+parallel = ["operant-envs/parallel"] # Enable multi-threaded parallel execution
+tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:nvml-wrapper"]
+cuda = ["dep:operant-cuda"]         # Enable GPU-accelerated environments
+
+[dependencies]
+operant-core = { workspace = true, features = ["pyo3"] }
+operant-envs = { workspace = true }
+operant-cuda = { path = "../operant-cuda", optional = true }
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+sysinfo = { workspace = true, optional = true }
+nvml-wrapper = { workspace = true, optional = true }

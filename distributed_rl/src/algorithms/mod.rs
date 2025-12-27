@@ -42,7 +42,7 @@ pub use gae::{compute_gae, compute_gae_vectorized, normalize_advantages};
 pub use policy_loss::{entropy_loss, ppo_clip_loss, value_loss};
 pub use vtrace::{compute_vtrace, compute_vtrace_batch, VTraceInput, VTraceResult};
 pub use actor_critic::{
-    ActorCritic, ForwardOutput, forward_output_discrete_ff, forward_output_continuous_ff,
+    ActorCritic, ActorCriticInference, ForwardOutput, forward_output_discrete_ff, forward_output_continuous_ff,
     forward_output_discrete_recurrent, forward_output_continuous_recurrent,
 };
 pub use algorithm::{

@@ -5,18 +5,38 @@
 //!
 //! # Design
 //!
-//! The `ActorCritic` trait is parameterized by:
+//! The trait hierarchy supports both inference and training modes:
+//!
+//! - [`ActorCriticInference`]: Base trait for inference - works with any `B: Backend`
+//!   (including inner backends without autodiff). Used by actor threads.
+//!
+//! - [`ActorCritic`]: Training trait - requires `B: AutodiffBackend` and extends
+//!   `ActorCriticInference`. Used by learner threads for gradient computation.
+//!
+//! This design follows Burn's philosophy where inference should use `model.valid()`
+//! to get an inner backend model without gradient tracking overhead.
+//!
+//! # Type Parameters
+//!
 //! - `A: ActionPolicy<B>` - Discrete or continuous action handling
 //! - `T: TemporalPolicy<B>` - Feed-forward or recurrent structure
 //!
-//! This allows the same trait to be implemented for:
-//! - Feed-forward discrete models (standard PPO)
-//! - Feed-forward continuous models (continuous PPO)
-//! - Recurrent discrete models (LSTM-PPO)
-//! - Recurrent continuous models (LSTM-PPO continuous)
+//! # Usage Pattern
+//!
+//! ```ignore
+//! // Learner thread (training with gradients)
+//! let model: M where M: ActorCritic<Autodiff<Wgpu>, A, T>
+//! let output = model.forward(obs, hidden);  // Creates computation graph
+//! let loss = compute_loss(&output);
+//! let grads = loss.backward();
+//!
+//! // Actor thread (inference without gradients)
+//! let inference_model = model.valid();  // M::InnerModule on Wgpu
+//! let output = inference_model.forward(obs, hidden);  // No graph!
+//! ```
 
 use burn::module::{AutodiffModule, Module};
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::Tensor;
 
 use super::action_policy::{ActionPolicy, PolicyOutput};
@@ -32,10 +52,13 @@ use super::temporal_policy::TemporalPolicy;
 /// - `policy`: Policy output (logits or mean/log_std) for action sampling
 /// - `values`: Value estimates [batch, 1]
 /// - `hidden`: Updated hidden state (() for feed-forward, RecurrentHidden for recurrent)
+///
+/// This struct is generic over `B: Backend`, allowing it to work with both
+/// autodiff backends (for training) and inner backends (for inference).
 #[derive(Clone)]
 pub struct ForwardOutput<B, A, T>
 where
-    B: AutodiffBackend,
+    B: Backend,
     A: ActionPolicy<B>,
     T: TemporalPolicy<B>,
 {
@@ -49,7 +72,7 @@ where
 
 impl<B, A, T> ForwardOutput<B, A, T>
 where
-    B: AutodiffBackend,
+    B: Backend,
     A: ActionPolicy<B>,
     T: TemporalPolicy<B>,
 {
@@ -76,19 +99,18 @@ where
 }
 
 // ============================================================================
-// ActorCritic Trait
+// ActorCriticInference Trait - For Inference (Any Backend)
 // ============================================================================
 
-/// Unified actor-critic model trait for policy gradient algorithms.
+/// Base trait for actor-critic inference - works with any Backend.
 ///
-/// This trait abstracts over the forward pass of actor-critic networks,
-/// allowing the same training logic to work with any combination of:
-/// - Action policies (discrete, continuous)
-/// - Temporal structures (feed-forward, recurrent)
+/// This trait is designed to work with both autodiff backends (like `Autodiff<Wgpu>`)
+/// and their inner backends (like `Wgpu`). Actor threads should use the inner backend
+/// via `model.valid()` to avoid computation graph accumulation.
 ///
 /// # Type Parameters
 ///
-/// - `B`: Autodiff backend (e.g., `Autodiff<NdArray>`)
+/// - `B`: Any backend (NOT restricted to `AutodiffBackend`)
 /// - `A`: Action policy type (e.g., `DiscretePolicy`, `ContinuousPolicy`)
 /// - `T`: Temporal policy type (e.g., `FeedForward`, `Recurrent`)
 ///
@@ -105,25 +127,26 @@ where
 /// # Example
 ///
 /// ```ignore
-/// // Feed-forward discrete policy
-/// impl<B: AutodiffBackend> ActorCritic<B, DiscretePolicy, FeedForward> for MyModel<B> {
+/// // Implement for any Backend (not just AutodiffBackend)
+/// impl<B: Backend> ActorCriticInference<B, DiscretePolicy, FeedForward> for MyModel<B> {
 ///     fn forward(
 ///         &self,
 ///         obs: Tensor<B, 2>,
 ///         _hidden: (),
 ///     ) -> ForwardOutput<B, DiscretePolicy, FeedForward> {
-///         let (logits, values) = self.network.forward(obs);
+///         let (logits, values) = self.network_forward(obs);
 ///         ForwardOutput::new(
 ///             DiscretePolicyOutput { logits },
 ///             values,
 ///             (),
 ///         )
 ///     }
+///     // ... other methods
 /// }
 /// ```
-pub trait ActorCritic<B, A, T>: Module<B> + AutodiffModule<B> + Clone + Send + 'static
+pub trait ActorCriticInference<B, A, T>: Module<B> + Clone + Send + 'static
 where
-    B: AutodiffBackend,
+    B: Backend,
     A: ActionPolicy<B>,
     T: TemporalPolicy<B>,
 {
@@ -166,6 +189,43 @@ where
 }
 
 // ============================================================================
+// ActorCritic Trait - For Training (AutodiffBackend)
+// ============================================================================
+
+/// Training trait for actor-critic models - requires AutodiffBackend.
+///
+/// This trait extends [`ActorCriticInference`] and adds the [`AutodiffModule`] bound,
+/// enabling gradient computation for training. The learner thread uses this trait.
+///
+/// # Type Parameters
+///
+/// - `B`: Autodiff backend (e.g., `Autodiff<Wgpu>`, `Autodiff<NdArray>`)
+/// - `A`: Action policy type
+/// - `T`: Temporal policy type
+///
+/// # Design
+///
+/// This trait deliberately has no additional methods. It serves as a marker that:
+/// 1. The model can compute gradients (`AutodiffModule<B>`)
+/// 2. The model's `InnerModule` can be used for inference on `B::InnerBackend`
+///
+/// # Example
+///
+/// ```ignore
+/// // After implementing ActorCriticInference<B: Backend>, implement ActorCritic:
+/// impl<B: AutodiffBackend> ActorCritic<B, DiscretePolicy, FeedForward> for MyModel<B> {}
+/// ```
+pub trait ActorCritic<B, A, T>: ActorCriticInference<B, A, T> + AutodiffModule<B>
+where
+    B: AutodiffBackend,
+    A: ActionPolicy<B>,
+    T: TemporalPolicy<B>,
+{
+    // Training-specific methods can be added here if needed.
+    // Currently empty - training methods are inherited from ActorCriticInference.
+}
+
+// ============================================================================
 // Helper Functions for Model Construction
 // ============================================================================
 
@@ -175,7 +235,7 @@ pub fn forward_output_discrete_ff<B>(
     values: Tensor<B, 2>,
 ) -> ForwardOutput<B, super::action_policy::DiscretePolicy, super::temporal_policy::FeedForward>
 where
-    B: AutodiffBackend,
+    B: Backend,
 {
     ForwardOutput::new(
         super::action_policy::DiscretePolicyOutput { logits },
@@ -192,7 +252,7 @@ pub fn forward_output_continuous_ff<B>(
     bounds: (Vec<f32>, Vec<f32>),
 ) -> ForwardOutput<B, super::action_policy::ContinuousPolicy, super::temporal_policy::FeedForward>
 where
-    B: AutodiffBackend,
+    B: Backend,
 {
     ForwardOutput::new(
         super::action_policy::ContinuousPolicyOutput {
@@ -212,7 +272,7 @@ pub fn forward_output_discrete_recurrent<B>(
     hidden: super::temporal_policy::RecurrentHidden<B>,
 ) -> ForwardOutput<B, super::action_policy::DiscretePolicy, super::temporal_policy::Recurrent>
 where
-    B: AutodiffBackend,
+    B: Backend,
 {
     ForwardOutput::new(
         super::action_policy::DiscretePolicyOutput { logits },
@@ -230,7 +290,7 @@ pub fn forward_output_continuous_recurrent<B>(
     hidden: super::temporal_policy::RecurrentHidden<B>,
 ) -> ForwardOutput<B, super::action_policy::ContinuousPolicy, super::temporal_policy::Recurrent>
 where
-    B: AutodiffBackend,
+    B: Backend,
 {
     ForwardOutput::new(
         super::action_policy::ContinuousPolicyOutput {
@@ -256,23 +316,23 @@ mod tests {
     use burn::backend::Autodiff;
     use burn::module::Module;
     use burn::nn::{Linear, LinearConfig};
-    use burn::tensor::backend::Backend;
 
     type B = Autodiff<NdArray<f32>>;
+    type InnerB = NdArray<f32>;
 
     /// Simple feed-forward actor-critic for testing.
-    #[derive(Module, Debug)]
-    struct TestModel<B: Backend> {
-        policy_head: Linear<B>,
-        value_head: Linear<B>,
+    #[derive(Module, Debug, Clone)]
+    struct TestModel<Backend: burn::tensor::backend::Backend> {
+        policy_head: Linear<Backend>,
+        value_head: Linear<Backend>,
         #[module(skip)]
         n_actions: usize,
         #[module(skip)]
         obs_size: usize,
     }
 
-    impl TestModel<B> {
-        fn new(obs_size: usize, n_actions: usize, device: &<B as Backend>::Device) -> Self {
+    impl<Backend: burn::tensor::backend::Backend> TestModel<Backend> {
+        fn new(obs_size: usize, n_actions: usize, device: &Backend::Device) -> Self {
             Self {
                 policy_head: LinearConfig::new(obs_size, n_actions).init(device),
                 value_head: LinearConfig::new(obs_size, 1).init(device),
@@ -282,12 +342,15 @@ mod tests {
         }
     }
 
-    impl ActorCritic<B, DiscretePolicy, FeedForward> for TestModel<B> {
+    // Implement ActorCriticInference for any Backend
+    impl<Backend: burn::tensor::backend::Backend> ActorCriticInference<Backend, DiscretePolicy, FeedForward>
+        for TestModel<Backend>
+    {
         fn forward(
             &self,
-            obs: Tensor<B, 2>,
+            obs: Tensor<Backend, 2>,
             _hidden: (),
-        ) -> ForwardOutput<B, DiscretePolicy, FeedForward> {
+        ) -> ForwardOutput<Backend, DiscretePolicy, FeedForward> {
             let logits = self.policy_head.forward(obs.clone());
             let values = self.value_head.forward(obs);
             ForwardOutput::new(DiscretePolicyOutput { logits }, values, ())
@@ -306,10 +369,13 @@ mod tests {
         }
     }
 
+    // Implement ActorCritic for AutodiffBackend
+    impl ActorCritic<B, DiscretePolicy, FeedForward> for TestModel<B> {}
+
     #[test]
     fn test_actor_critic_forward() {
         let device = <B as Backend>::Device::default();
-        let model = TestModel::new(4, 2, &device);
+        let model = TestModel::<B>::new(4, 2, &device);
 
         // Create batch of observations
         let obs = Tensor::<B, 2>::zeros([8, 4], &device);
@@ -331,7 +397,7 @@ mod tests {
     #[test]
     fn test_actor_critic_sample() {
         let device = <B as Backend>::Device::default();
-        let model = TestModel::new(4, 3, &device);
+        let model = TestModel::<B>::new(4, 3, &device);
 
         let obs = Tensor::<B, 2>::zeros([16, 4], &device);
         let output = model.forward(obs, ());
@@ -377,8 +443,35 @@ mod tests {
     #[test]
     fn test_is_recurrent() {
         let device = <B as Backend>::Device::default();
-        let model = TestModel::new(4, 2, &device);
+        let model = TestModel::<B>::new(4, 2, &device);
 
         assert!(!model.is_recurrent());
+    }
+
+    #[test]
+    fn test_inner_backend_inference() {
+        // This test validates that the model.valid() pattern works for inner backend inference.
+        // The actual inner backend inference is validated in the runners where the generic
+        // constraints are properly expressed through the function signatures.
+        //
+        // Note: Direct type conversion from TestModel<Autodiff<NdArray>> to TestModel<NdArray>
+        // requires explicit trait bounds in function signatures, as demonstrated in the runner code:
+        //   M::InnerModule: ActorCriticInference<B::InnerBackend, A, T>
+        use burn::module::AutodiffModule;
+
+        let device = <B as Backend>::Device::default();
+        let model = TestModel::<B>::new(4, 2, &device);
+
+        // Verify that valid() can be called (returns M::InnerModule)
+        // The type conversion to inner backend is enforced through trait bounds in runners
+        let _inference_model = AutodiffModule::<B>::valid(&model);
+
+        // Forward pass on autodiff backend (training mode) works
+        let obs = Tensor::<B, 2>::zeros([8, 4], &device);
+        let output = model.forward(obs, ());
+
+        // Verify output
+        assert_eq!(output.policy.logits.dims(), [8, 2]);
+        assert_eq!(output.values.dims(), [8, 1]);
     }
 }

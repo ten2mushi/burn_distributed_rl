@@ -23,7 +23,7 @@
 
 use burn::optim::{GradientsParams, Optimizer};
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::Tensor;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::algorithms::action_policy::{ActionPolicy, ActionValue, ContinuousPolicy, DiscretePolicy, PolicyOutput};
-use crate::algorithms::actor_critic::ActorCritic;
+use crate::algorithms::actor_critic::{ActorCritic, ActorCriticInference};
 use crate::algorithms::gae::compute_gae;
 use crate::algorithms::ppo::RecurrentPPOBuffer;
 use crate::algorithms::temporal_policy::{HiddenStateType, Recurrent, RecurrentHidden, TemporalPolicy};
@@ -97,8 +97,12 @@ where
         MF: Fn(&B::Device) -> M + Send + Sync + Clone + 'static,
         M: ActorCritic<B, A, Recurrent> + Clone + 'static,
         M::Record: Send + 'static,
+        // Inner backend bounds for actor inference (no autodiff graphs)
+        M::InnerModule: ActorCriticInference<B::InnerBackend, A, Recurrent>,
+        A: ActionPolicy<B::InnerBackend, Action = <A as ActionPolicy<B>>::Action>,
+        Recurrent: TemporalPolicy<B::InnerBackend, Hidden = RecurrentHidden<B::InnerBackend>>,
         EF: Fn(usize, usize) -> E + Send + Sync + Clone + 'static,
-        E: VectorizedEnv<A::Action> + 'static,
+        E: VectorizedEnv<<A as ActionPolicy<B>>::Action> + 'static,
         O: Optimizer<M, B> + 'static,
         F: Fn(&DistributedPPOStats),
     {
@@ -303,6 +307,9 @@ where
     /// 1. Hidden state persists across steps (not reset each step)
     /// 2. Hidden state reset on episode termination
     /// 3. Hidden state stored with each transition
+    ///
+    /// Uses inner backend (non-autodiff) for inference to avoid computation graph
+    /// accumulation. This is critical for maintaining consistent SPS throughout training.
     fn actor_thread<M, MF, EF, E>(
         actor_id: usize,
         config: &DistributedPPOConfig,
@@ -320,13 +327,19 @@ where
         MF: Fn(&B::Device) -> M,
         M: ActorCritic<B, A, Recurrent>,
         M::Record: Send + 'static,
+        // Inner backend bounds for graph-free inference
+        M::InnerModule: ActorCriticInference<B::InnerBackend, A, Recurrent>,
+        A: ActionPolicy<B::InnerBackend, Action = <A as ActionPolicy<B>>::Action>,
+        Recurrent: TemporalPolicy<B::InnerBackend, Hidden = RecurrentHidden<B::InnerBackend>>,
         EF: Fn(usize, usize) -> E,
-        E: VectorizedEnv<A::Action>,
+        E: VectorizedEnv<<A as ActionPolicy<B>>::Action>,
     {
+        // Create devices: autodiff for weight loading, inner for inference
         let device = B::Device::default();
+        let inner_device = <B::InnerBackend as Backend>::Device::default();
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
 
-        // Create model using factory
+        // Create model using factory (on autodiff backend for weight loading)
         let mut model = model_factory(&device);
 
         // Load initial weights
@@ -343,6 +356,10 @@ where
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        // Get inference model on inner backend (no autodiff - no computation graphs!)
+        // This is the key optimization: forward passes won't accumulate orphaned graphs.
+        let mut inference_model: M::InnerModule = model.valid();
+
         // Create environment
         let mut env = env_factory(actor_id, config.n_envs_per_actor);
         let obs_size = env.obs_size();
@@ -355,12 +372,13 @@ where
 
         // ============================================================
         // FIX #1: Initialize hidden state ONCE, persist across steps
+        // Hidden state on INNER backend for graph-free inference
         // ============================================================
-        let mut hidden = RecurrentHidden::<B>::new(
+        let mut hidden = RecurrentHidden::<B::InnerBackend>::new(
             n_envs,
             hidden_config.hidden_size,
             hidden_config.has_cell,
-            &device,
+            &inner_device,
         );
 
         // Track episode state
@@ -390,6 +408,8 @@ where
                     if let Some(bytes) = bytes_slot.get() {
                         if let Ok(record) = recorder.load(bytes, &device) {
                             model = model.load_record(record);
+                            // Refresh inference model with updated weights
+                            inference_model = model.valid();
                             last_version = current_version;
                         }
                     }
@@ -412,14 +432,15 @@ where
                 .map(|i| hidden.get(i).to_vec())
                 .collect();
 
-            // Forward pass with PERSISTED hidden state
-            let obs_tensor = Tensor::<B, 1>::from_floats(obs_buffer.as_slice(), &device)
-                .reshape([n_envs, obs_size]);
+            // Forward pass on INNER backend - NO computation graph accumulation!
+            let obs_tensor =
+                Tensor::<B::InnerBackend, 1>::from_floats(obs_buffer.as_slice(), &inner_device)
+                    .reshape([n_envs, obs_size]);
 
-            let output = model.forward(obs_tensor, hidden.clone());
+            let output = inference_model.forward(obs_tensor, hidden.clone());
 
-            // Sample actions and get values BEFORE moving hidden state
-            let (actions, log_probs) = output.sample_actions(&device);
+            // Sample actions and get values (also on inner backend - no graph overhead)
+            let (actions, log_probs) = output.sample_actions(&inner_device);
             let values: Vec<f32> = output
                 .values_flat()
                 .into_data()
@@ -443,13 +464,15 @@ where
                 .collect();
 
             // Calculate bootstrap values if at rollout boundary
+            // Uses inner backend for graph-free inference
             let mut bootstrap_values = vec![None; n_envs];
             if steps_this_epoch == config.rollout_length - 1 {
-                let next_obs_tensor = Tensor::<B, 1>::from_floats(obs_buffer.as_slice(), &device)
-                    .reshape([n_envs, obs_size]);
+                let next_obs_tensor =
+                    Tensor::<B::InnerBackend, 1>::from_floats(obs_buffer.as_slice(), &inner_device)
+                        .reshape([n_envs, obs_size]);
                 // hidden is already updated to the state corresponding to next_obs
-                let output = model.forward(next_obs_tensor, hidden.clone());
-                let values: Vec<f32> = output
+                let output = inference_model.forward(next_obs_tensor, hidden.clone());
+                let bootstrap_vals: Vec<f32> = output
                     .values_flat()
                     .into_data()
                     .as_slice()
@@ -459,7 +482,7 @@ where
                 for i in 0..n_envs {
                     // Only bootstrap if not done (terminated or truncated by env)
                     if !step_result.dones[i] {
-                        bootstrap_values[i] = Some(values[i]);
+                        bootstrap_values[i] = Some(bootstrap_vals[i]);
                     }
                 }
             }
@@ -559,7 +582,7 @@ where
             // Truncated episodes keep their hidden state - the agent's learned memory
             // persists across the artificial episode boundary
             for &idx in &terminal_indices {
-                hidden.reset(idx, &device);
+                hidden.reset(idx, &inner_device);
             }
 
             env_steps.fetch_add(n_envs, Ordering::Relaxed);

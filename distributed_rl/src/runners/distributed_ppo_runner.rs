@@ -53,7 +53,7 @@
 
 use burn::optim::{GradientsParams, Optimizer};
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::Tensor;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -63,7 +63,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::algorithms::action_policy::{ActionPolicy, ActionValue, PolicyOutput};
-use crate::algorithms::actor_critic::ActorCritic;
+use crate::algorithms::actor_critic::{ActorCritic, ActorCriticInference};
 use crate::algorithms::gae::compute_gae;
 use crate::algorithms::temporal_policy::TemporalPolicy;
 use crate::core::bytes_slot::{bytes_slot_with, SharedBytesSlot};
@@ -147,8 +147,12 @@ where
         MF: Fn(&B::Device) -> M + Send + Sync + Clone + 'static,
         M: ActorCritic<B, A, T> + Clone + 'static,
         M::Record: Send + 'static,
+        // Inner backend bounds for actor inference (no autodiff graphs)
+        M::InnerModule: ActorCriticInference<B::InnerBackend, A, T>,
+        A: ActionPolicy<B::InnerBackend, Action = <A as ActionPolicy<B>>::Action>,
+        T: TemporalPolicy<B::InnerBackend>,
         EF: Fn(usize, usize) -> E + Send + Sync + Clone + 'static,
-        E: VectorizedEnv<A::Action> + 'static,
+        E: VectorizedEnv<<A as ActionPolicy<B>>::Action> + 'static,
         O: Optimizer<M, B> + 'static,
         F: Fn(&DistributedPPOStats),
     {
@@ -345,6 +349,9 @@ where
     }
 
     /// Actor thread: creates model via factory, collects experience, pushes to buffer.
+    ///
+    /// Uses inner backend (non-autodiff) for inference to avoid computation graph
+    /// accumulation. This is critical for maintaining consistent SPS throughout training.
     fn actor_thread<M, MF, EF, E>(
         actor_id: usize,
         config: &DistributedPPOConfig,
@@ -361,14 +368,19 @@ where
         MF: Fn(&B::Device) -> M,
         M: ActorCritic<B, A, T>,
         M::Record: Send + 'static,
+        // Inner backend bounds for graph-free inference
+        M::InnerModule: ActorCriticInference<B::InnerBackend, A, T>,
+        A: ActionPolicy<B::InnerBackend, Action = <A as ActionPolicy<B>>::Action>,
+        T: TemporalPolicy<B::InnerBackend>,
         EF: Fn(usize, usize) -> E,
-        E: VectorizedEnv<A::Action>,
+        E: VectorizedEnv<<A as ActionPolicy<B>>::Action>,
     {
-        // Create actor's own device
+        // Create devices: autodiff for weight loading, inner for inference
         let device = B::Device::default();
+        let inner_device = <B::InnerBackend as Backend>::Device::default();
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
 
-        // Create model using factory
+        // Create model using factory (on autodiff backend for weight loading)
         let mut model = model_factory(&device);
 
         // Load initial weights from bytes slot
@@ -384,6 +396,10 @@ where
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+
+        // Get inference model on inner backend (no autodiff - no computation graphs!)
+        // This is the key optimization: forward passes won't accumulate orphaned graphs.
+        let mut inference_model: M::InnerModule = model.valid();
 
         // Create environment
         let mut env = env_factory(actor_id, config.n_envs_per_actor);
@@ -415,6 +431,8 @@ where
                     if let Some(bytes) = bytes_slot.get() {
                         if let Ok(record) = recorder.load(bytes, &device) {
                             model = model.load_record(record);
+                            // Refresh inference model with updated weights
+                            inference_model = model.valid();
                             last_version = current_version;
                         }
                     }
@@ -432,15 +450,16 @@ where
                 })
                 .collect();
 
-            // Forward pass
-            let obs_tensor = Tensor::<B, 1>::from_floats(obs_buffer.as_slice(), &device)
-                .reshape([n_envs, obs_size]);
+            // Forward pass on INNER backend - NO computation graph accumulation!
+            let obs_tensor =
+                Tensor::<B::InnerBackend, 1>::from_floats(obs_buffer.as_slice(), &inner_device)
+                    .reshape([n_envs, obs_size]);
 
-            let hidden = model.initial_hidden(n_envs, &device);
-            let output = model.forward(obs_tensor, hidden);
+            let hidden = inference_model.initial_hidden(n_envs, &inner_device);
+            let output = inference_model.forward(obs_tensor, hidden);
 
-            // Sample actions
-            let (actions, log_probs) = output.sample_actions(&device);
+            // Sample actions (also on inner backend - no graph overhead)
+            let (actions, log_probs) = output.sample_actions(&inner_device);
             let values: Vec<f32> = output
                 .values_flat()
                 .into_data()

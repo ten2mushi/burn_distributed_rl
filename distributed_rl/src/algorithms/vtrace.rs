@@ -142,10 +142,11 @@ pub fn compute_vtrace(
         // V-trace target: v_s = V(s) + δ_s + γ * c_s * (v_{s+1} - V(s+1))
         vs[t] = values[t] + delta + gamma * not_done * cs[t] * (next_vs - next_value);
 
-        // Advantage for policy gradient (raw TD error)
+        // Advantage for policy gradient using V-trace targets
         // NOTE: rho is NOT included here - it's applied externally in the policy loss
-        // This matches the IMPALA paper: A_t = r_t + γ*V(s_{t+1}) - V(s_t)
-        advantages[t] = rewards[t] + gamma * next_value * not_done - values[t];
+        // Per IMPALA paper eq(3): A_t = r_t + γ*v_{t+1} - V(s_t)
+        // Using V-trace target v_{t+1} (not raw value V) provides multi-step credit assignment
+        advantages[t] = rewards[t] + gamma * next_vs * not_done - values[t];
 
         next_vs = vs[t];
         next_value = values[t];
@@ -372,18 +373,17 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn regression_bug2_advantage_uses_value_not_target() {
-        // Bug 2: Advantage formula was using next_vs (V-trace target) instead of
-        // next_value (value estimate). This test ensures advantages use values.
-        //
-        // The correct advantage is: A_t = r_t + γ*V(s_{t+1}) - V(s_t)
-        // NOT: A_t = r_t + γ*vs_{t+1} - V(s_t)
+    fn test_advantage_uses_vtrace_target() {
+        // Per IMPALA paper eq(3), advantage uses V-trace target v_{t+1}:
+        // A_t = r_t + γ*v_{t+1} - V(s_t)
+        // For single step, v_{t+1} = bootstrap, so result is same as using V.
+        // For multi-step, V-trace targets provide multi-step credit assignment.
 
         let log_probs = vec![-1.0];
         let rewards = vec![1.0];
         let values = vec![0.5];
         let dones = vec![false];
-        let bootstrap = 0.8;  // Non-trivial bootstrap
+        let bootstrap = 0.8;  // V-trace target for next state
         let gamma = 0.99;
 
         let result = compute_vtrace(
@@ -398,21 +398,22 @@ mod tests {
             1.0,
         );
 
-        // Expected advantage: 1.0 + 0.99 * 0.8 - 0.5 = 1.0 + 0.792 - 0.5 = 1.292
-        // This uses value[0.8], NOT the V-trace target
+        // For single step: next_vs = bootstrap = 0.8
+        // advantage = r + γ*next_vs - V = 1.0 + 0.99*0.8 - 0.5 = 1.292
         let expected_advantage = 1.0 + gamma * bootstrap - values[0];
         assert!(
             (result.advantages[0] - expected_advantage).abs() < 1e-6,
-            "Expected advantage={}, got {}. Bug 2 regression!",
+            "Expected advantage={}, got {}",
             expected_advantage,
             result.advantages[0]
         );
     }
 
     #[test]
-    fn regression_bug3_rho_not_in_advantages() {
-        // Bug 3: Advantages were including rho weighting, but IMPALA paper
-        // specifies raw TD errors for advantages. Rho is applied externally.
+    fn test_rho_not_in_advantages() {
+        // IMPALA paper: rho weights the policy gradient externally, not in advantages.
+        // Advantage = r + γ*v_{t+1} - V(s_t)  (no rho)
+        // Policy loss = -rho * log_prob * advantage  (rho applied here)
 
         // Create off-policy scenario where rho != 1
         let behavior_log_probs = vec![-2.0];  // Low probability action
@@ -435,8 +436,8 @@ mod tests {
             1.0,  // c_bar
         );
 
-        // Advantage should be raw TD error without rho:
-        // A = r + γ*V(next) - V(current) = 1.0 + 0.99*0.5 - 0.5 = 0.995
+        // Advantage uses V-trace target (which equals bootstrap for single step):
+        // A = r + γ*v_{next} - V = 1.0 + 0.99*0.5 - 0.5 = 0.995
         let expected_advantage = 1.0 + gamma * bootstrap - values[0];
         assert!(
             (result.advantages[0] - expected_advantage).abs() < 1e-6,
@@ -445,7 +446,7 @@ mod tests {
             result.advantages[0]
         );
 
-        // rho should be tracked separately for policy loss
+        // rho is tracked separately for policy loss
         // rho = exp(target - behavior) = exp(-0.5 - (-2.0)) = exp(1.5) ≈ 4.48
         // But clipped to 1.0
         assert!(
@@ -513,8 +514,53 @@ mod tests {
         assert_eq!(result.rhos.len(), 1);
 
         // For single step on-policy:
-        // advantage = r + γ*V(next) - V(s) = 1.0 + 0.99*0.5 - 0.5 = 0.995
+        // advantage = r + γ*v_next - V(s) = 1.0 + 0.99*0.5 - 0.5 = 0.995
+        // (for single step, v_next = bootstrap)
         let expected_adv = 1.0 + 0.99 * 0.5 - 0.5;
         assert!((result.advantages[0] - expected_adv).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_multistep_advantage_uses_vtrace_targets() {
+        // Multi-step test to verify advantages use V-trace targets, not raw values.
+        // This is critical for proper multi-step credit assignment.
+        let log_probs = vec![-1.0, -1.0, -1.0];
+        let rewards = vec![1.0, 1.0, 1.0];
+        let values = vec![0.0, 0.0, 0.0]; // Poor value estimates
+        let dones = vec![false, false, false];
+        let bootstrap = 0.0;
+        let gamma = 0.99;
+
+        let result = compute_vtrace(
+            &log_probs,
+            &log_probs, // on-policy: rho=1, c=1
+            &rewards,
+            &values,
+            &dones,
+            bootstrap,
+            gamma,
+            1.0,
+            1.0,
+        );
+
+        // With on-policy and zero values, V-trace targets accumulate returns:
+        // vs[2] = 0 + 1*(1 + 0.99*0 - 0) + 0.99*1*(0 - 0) = 1.0
+        // vs[1] = 0 + 1*(1 + 0.99*0 - 0) + 0.99*1*(1.0 - 0) = 1 + 0.99 = 1.99
+        // vs[0] = 0 + 1*(1 + 0.99*0 - 0) + 0.99*1*(1.99 - 0) = 1 + 1.9701 = 2.9701
+
+        // Advantages use V-trace targets:
+        // adv[2] = 1 + 0.99*bootstrap - 0 = 1.0
+        // adv[1] = 1 + 0.99*vs[2] - 0 = 1 + 0.99*1.0 = 1.99
+        // adv[0] = 1 + 0.99*vs[1] - 0 = 1 + 0.99*1.99 = 2.9701
+
+        // All advantages should be positive and increasing toward the start
+        assert!(result.advantages[0] > result.advantages[1]);
+        assert!(result.advantages[1] > result.advantages[2]);
+        assert!(result.advantages[2] > 0.9);
+
+        // Verify specific values
+        assert!((result.advantages[2] - 1.0).abs() < 1e-5);
+        assert!((result.advantages[1] - 1.99).abs() < 1e-4);
+        assert!((result.advantages[0] - 2.9701).abs() < 1e-3);
     }
 }

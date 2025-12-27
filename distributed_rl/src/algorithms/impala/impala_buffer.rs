@@ -7,6 +7,7 @@ use crate::core::experience_buffer::{ExperienceBuffer, OffPolicyBuffer};
 use crate::core::transition::{IMPALATransition, Trajectory};
 use crossbeam_deque::{Injector, Steal};
 use parking_lot::RwLock;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Configuration for IMPALA trajectory buffer.
@@ -136,12 +137,17 @@ impl IMPALABatch {
 ///
 /// Actors push complete trajectories, and the learner samples
 /// batches in FIFO order for V-trace training.
+///
+/// Uses `VecDeque` for O(1) front removal operations (FIFO).
+/// This is critical for preventing SPS degradation over long runs.
 pub struct IMPALABuffer {
     config: IMPALABufferConfig,
     /// Lock-free injection queue.
     injector: Injector<Trajectory<IMPALATransition>>,
-    /// Consolidated storage.
-    storage: RwLock<Vec<Trajectory<IMPALATransition>>>,
+    /// Consolidated storage using VecDeque for O(1) pop_front().
+    /// Previously used Vec, but Vec::remove(0) is O(n) causing
+    /// progressive SPS degradation over long training runs.
+    storage: RwLock<VecDeque<Trajectory<IMPALATransition>>>,
     /// Storage size (atomic).
     size: AtomicUsize,
     /// Pending injector size.
@@ -154,7 +160,7 @@ impl IMPALABuffer {
         Self {
             config,
             injector: Injector::new(),
-            storage: RwLock::new(Vec::new()),
+            storage: RwLock::new(VecDeque::new()),
             size: AtomicUsize::new(0),
             pending_size: AtomicUsize::new(0),
         }
@@ -208,7 +214,7 @@ impl IMPALABuffer {
         loop {
             match self.injector.steal() {
                 Steal::Success(traj) => {
-                    storage.push(traj);
+                    storage.push_back(traj); // O(1) amortized for VecDeque
                     count += 1;
                 }
                 Steal::Empty => break,
@@ -216,9 +222,10 @@ impl IMPALABuffer {
             }
         }
 
-        // Enforce max capacity (FIFO eviction)
+        // Enforce max capacity (FIFO eviction) - O(1) per removal with VecDeque
+        // Previously used Vec::remove(0) which is O(n), causing SPS degradation
         while storage.len() > self.config.max_trajectories {
-            storage.remove(0);
+            storage.pop_front(); // O(1) for VecDeque vs O(n) for Vec
         }
 
         if count > 0 {

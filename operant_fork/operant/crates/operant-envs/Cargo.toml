@@ -1,0 +1,20 @@
+[package]
+name = "operant-envs"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+authors = ["Operant Contributors"]
+description = "SIMD-optimized RL environment implementations for Operant"
+
+[features]
+default = []
+simd = []          # Enable SIMD optimizations (requires nightly)
+parallel = ["rayon"]  # Enable multi-threaded parallel execution
+
+[dependencies]
+operant-core = { path = "../operant-core" }
+rand = "0.8"
+rand_xoshiro = "0.6"
+rayon = { version = "1.8", optional = true }
+
+[dev-dependencies]

@@ -1,0 +1,16 @@
+[package]
+name = "operant"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+authors = ["Operant Contributors"]
+description = "High-performance SIMD-optimized reinforcement learning environments"
+
+[features]
+default = ["simd"]
+simd = ["operant-envs/simd"]
+parallel = ["operant-envs/parallel"]
+
+[dependencies]
+operant-core = { path = "../operant-core" }
+operant-envs = { path = "../operant-envs" }

@@ -9,7 +9,7 @@ burn = { workspace = true }
 serde = { workspace = true }
 parking_lot = "0.12"
 fastrand = "2.0"
-operant = { path = "../../operant_fork/operant/crates/operant", default-features = false }
+operant = { path = "../operant_fork/operant/crates/operant", default-features = false }
 distributed_rl = { path = "../distributed_rl" }
 
 [features]

@@ -35,7 +35,7 @@ use burn::tensor::activation::{relu, tanh};
 use burn::tensor::Tensor;
 
 use distributed_rl::algorithms::action_policy::{ContinuousPolicy, ContinuousPolicyOutput};
-use distributed_rl::algorithms::actor_critic::{ActorCritic, ForwardOutput};
+use distributed_rl::algorithms::actor_critic::{ActorCritic, ActorCriticInference, ForwardOutput};
 use distributed_rl::algorithms::temporal_policy::{Recurrent, RecurrentHidden};
 use distributed_rl::core::recurrent::{LstmCellConfig, LstmCellWrapper, RecurrentCell};
 use distributed_rl::environment::PendulumEnv;
@@ -85,15 +85,17 @@ impl<B: burn::tensor::backend::Backend> RecurrentContinuousPPONet<B> {
 }
 
 // ============================================================================
-// ActorCritic Implementation
+// ActorCriticInference Implementation - For ANY Backend (including Inner)
 // ============================================================================
 
-impl ActorCritic<B, ContinuousPolicy, Recurrent> for RecurrentContinuousPPONet<B> {
+impl<Backend: burn::tensor::backend::Backend> ActorCriticInference<Backend, ContinuousPolicy, Recurrent>
+    for RecurrentContinuousPPONet<Backend>
+{
     fn forward(
         &self,
-        obs: Tensor<B, 2>,
-        hidden: RecurrentHidden<B>,
-    ) -> ForwardOutput<B, ContinuousPolicy, Recurrent> {
+        obs: Tensor<Backend, 2>,
+        hidden: RecurrentHidden<Backend>,
+    ) -> ForwardOutput<Backend, ContinuousPolicy, Recurrent> {
         let batch_size = obs.dims()[0];
         let device = obs.device();
 
@@ -139,6 +141,12 @@ impl ActorCritic<B, ContinuousPolicy, Recurrent> for RecurrentContinuousPPONet<B
         Recurrent::lstm(HIDDEN_SIZE)
     }
 }
+
+// ============================================================================
+// ActorCritic Implementation - For AutodiffBackend (Training)
+// ============================================================================
+
+impl ActorCritic<B, ContinuousPolicy, Recurrent> for RecurrentContinuousPPONet<B> {}
 
 // ============================================================================
 // Training Entry Point

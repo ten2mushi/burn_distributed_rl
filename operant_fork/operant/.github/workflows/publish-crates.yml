@@ -1,0 +1,82 @@
+name: Publish to crates.io
+
+on:
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (do not actually publish)'
+        required: true
+        type: boolean
+        default: true
+
+  # Automatic trigger on release
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check crate versions match
+        run: |
+          WORKSPACE_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Workspace version: $WORKSPACE_VERSION"
+
+      - name: Verify builds
+        run: |
+          cargo check -p operant-core
+          cargo check -p operant-envs --features "simd,parallel"
+          cargo check -p operant --features "simd,parallel"
+
+      - name: Run tests
+        run: |
+          cargo test -p operant-core
+          cargo test -p operant-envs --features "simd,parallel"
+          cargo test -p operant --features "simd,parallel"
+
+      - name: Publish operant-core (dry run)
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: cargo publish -p operant-core --dry-run
+
+      # Note: dry-run for operant-envs and operant will always fail because
+      # their dependencies aren't on crates.io yet. The actual publish works
+      # because it publishes in order with waits between each crate.
+
+      - name: Publish operant-core
+        if: ${{ github.event.inputs.dry_run != 'true' || github.event_name == 'release' }}
+        run: cargo publish -p operant-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io to index operant-core
+        if: ${{ github.event.inputs.dry_run != 'true' || github.event_name == 'release' }}
+        run: sleep 30
+
+      - name: Publish operant-envs
+        if: ${{ github.event.inputs.dry_run != 'true' || github.event_name == 'release' }}
+        run: cargo publish -p operant-envs --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io to index operant-envs
+        if: ${{ github.event.inputs.dry_run != 'true' || github.event_name == 'release' }}
+        run: sleep 30
+
+      - name: Publish operant
+        if: ${{ github.event.inputs.dry_run != 'true' || github.event_name == 'release' }}
+        run: cargo publish -p operant --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

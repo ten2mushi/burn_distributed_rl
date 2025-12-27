@@ -27,7 +27,7 @@ use burn::tensor::activation::{relu, tanh};
 use burn::tensor::Tensor;
 
 use distributed_rl::algorithms::action_policy::{ContinuousPolicy, ContinuousPolicyOutput};
-use distributed_rl::algorithms::actor_critic::{ActorCritic, ForwardOutput};
+use distributed_rl::algorithms::actor_critic::{ActorCritic, ActorCriticInference, ForwardOutput};
 use distributed_rl::algorithms::temporal_policy::FeedForward;
 use distributed_rl::environment::PendulumEnv;
 use distributed_rl::runners::{DistributedPPOConfig, DistributedPPOContinuous};
@@ -85,15 +85,17 @@ impl<B: burn::tensor::backend::Backend> ContinuousPPONet<B> {
 }
 
 // ============================================================================
-// ActorCritic Implementation
+// ActorCriticInference Implementation - For ANY Backend (including Inner)
 // ============================================================================
 
-impl ActorCritic<B, ContinuousPolicy, FeedForward> for ContinuousPPONet<B> {
+impl<Backend: burn::tensor::backend::Backend> ActorCriticInference<Backend, ContinuousPolicy, FeedForward>
+    for ContinuousPPONet<Backend>
+{
     fn forward(
         &self,
-        obs: Tensor<B, 2>,
+        obs: Tensor<Backend, 2>,
         _hidden: (),
-    ) -> ForwardOutput<B, ContinuousPolicy, FeedForward> {
+    ) -> ForwardOutput<Backend, ContinuousPolicy, FeedForward> {
         let (mean, log_std, values) = self.forward_net(obs);
         ForwardOutput::new(
             ContinuousPolicyOutput {
@@ -119,6 +121,12 @@ impl ActorCritic<B, ContinuousPolicy, FeedForward> for ContinuousPPONet<B> {
         FeedForward::new()
     }
 }
+
+// ============================================================================
+// ActorCritic Implementation - For AutodiffBackend (Training)
+// ============================================================================
+
+impl ActorCritic<B, ContinuousPolicy, FeedForward> for ContinuousPPONet<B> {}
 
 // ============================================================================
 // Training Entry Point

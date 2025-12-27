@@ -317,10 +317,10 @@ fn test_impala_config_defaults() {
     let config = IMPALAConfig::default();
 
     assert_eq!(config.gamma, 0.99);
-    assert_eq!(config.rho_clip, 1.0);
+    assert_eq!(config.rho_clip, 1.5);
     assert_eq!(config.c_clip, 1.0);
-    assert_eq!(config.vf_coef, 0.5);
-    assert_eq!(config.entropy_coef, 0.01);
+    assert_eq!(config.vf_coef, 0.25);
+    assert_eq!(config.entropy_coef, 0.02);
     assert_eq!(config.trajectory_length, 20);
     assert_eq!(config.batch_size, 32);
 }
