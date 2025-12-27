@@ -1,0 +1,17 @@
+[package]
+name = "distributed-rl-examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+burn = { workspace = true }
+serde = { workspace = true }
+parking_lot = "0.12"
+fastrand = "2.0"
+operant = { path = "../../operant_fork/operant/crates/operant", default-features = false }
+distributed_rl = { path = "../distributed_rl" }
+
+[features]
+default = ["burn/ndarray"]
+simd = ["distributed_rl/simd", "operant/simd"]

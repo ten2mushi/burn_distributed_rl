@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "distributed_rl", "examples"
+]
+
+[workspace.dependencies]
+burn = { version = "0.19", features = ["ndarray", "wgpu", "autodiff"] }
+serde = "1"

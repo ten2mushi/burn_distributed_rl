@@ -1,0 +1,26 @@
+[package]
+name = "distributed_rl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+simd = ["operant/simd"]
+parallel = ["operant/parallel"]
+
+[dependencies]
+burn = { workspace = true }
+serde = { workspace = true }
+rand = "0.8.5"
+crossbeam = "0.8"
+crossbeam-deque = "0.8"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+fastrand = "2.0"
+lazy_static = "1.4"
+operant = { path = "../../operant_fork/operant/crates/operant", default-features = false }
+operant-core = { path = "../../operant_fork/operant/crates/operant-core" }
+
+[dev-dependencies]
+tempfile = "3.10"
