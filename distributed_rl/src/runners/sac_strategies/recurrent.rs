@@ -121,7 +121,7 @@ where
         // Initialize hidden states for batch
         // In a full implementation, we would restore hidden states from transitions
         // For simplicity, we use initial hidden states
-        let actor_hidden = actor.initial_hidden(batch_size, device);
+        let _actor_hidden = actor.initial_hidden(batch_size, device);
         let critic_hidden = critic.initial_hidden(batch_size, device);
         let target_hidden = target_critic.initial_hidden(batch_size, device);
 

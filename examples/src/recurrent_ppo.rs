@@ -141,6 +141,7 @@ impl<B: burn::tensor::backend::Backend> RecurrentPPONet<B> {
     }
 
     /// Get initial hidden state for a batch of environments.
+    #[allow(dead_code)]
     pub fn initial_hidden(&self, batch_size: usize, device: &B::Device) -> HiddenState<B> {
         self.lstm.initial_state(batch_size, device)
     }

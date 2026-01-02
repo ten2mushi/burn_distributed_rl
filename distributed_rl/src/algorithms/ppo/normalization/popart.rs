@@ -237,15 +237,14 @@ impl PopArt {
         old_mean: f32,
         old_std: f32,
     ) -> Linear<B> {
-        let (weight_scale, bias_scale, bias_shift) =
+        let (_weight_scale, bias_scale, bias_shift) =
             Self::compute_rescaling(old_mean, old_std, self.mean, self.std());
 
         let device = value_head.weight.device();
 
-        // Rescale weights: w_new = w_old * (σ_old / σ_new)
-        let new_weight = value_head.weight.val() * weight_scale;
-
         // Rescale bias: b_new = b_old * (σ_old / σ_new) + (μ_old - μ_new) / σ_new
+        // Note: Weight rescaling (w_new = w_old * weight_scale) would require
+        // Burn's module record API - currently returns a new linear with config
         let new_bias = match value_head.bias {
             Some(bias) => Some(bias.val() * bias_scale + bias_shift),
             None => None,
@@ -258,7 +257,7 @@ impl PopArt {
 
         let config = burn::nn::LinearConfig::new(in_features, out_features)
             .with_bias(new_bias.is_some());
-        let mut new_linear = config.init(&device);
+        let new_linear = config.init(&device);
 
         // Set the new weights
         // Note: In Burn, this requires using the module's record API
@@ -335,11 +334,13 @@ impl PopArt {
 }
 
 /// Thread-safe PopArt normalizer.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SharedPopArt {
     inner: Arc<RwLock<PopArt>>,
 }
 
+#[allow(dead_code)]
 impl SharedPopArt {
     /// Create a new thread-safe PopArt normalizer.
     pub fn new(config: PopArtConfig) -> Self {

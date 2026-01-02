@@ -27,7 +27,6 @@
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::backend::Autodiff;
 use burn::module::{Module, Param};
-use burn::prelude::*;
 use burn::tensor::activation::tanh;
 use burn::tensor::Tensor;
 
@@ -166,6 +165,7 @@ impl<B: burn::tensor::backend::Backend> RecurrentPPOContinuousNet<B> {
     }
 
     /// Get initial hidden state for a batch of environments.
+    #[allow(dead_code)]
     pub fn initial_hidden(&self, batch_size: usize, device: &B::Device) -> HiddenState<B> {
         self.lstm.initial_state(batch_size, device)
     }

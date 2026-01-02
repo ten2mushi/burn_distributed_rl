@@ -394,6 +394,7 @@ impl<D: SACDataMarker> SACTransitionTrait for SACTransition<D> {
 }
 
 // Extended trait for recurrent transitions with hidden state access
+#[allow(dead_code)]
 pub trait SACRecurrentTransitionTrait: SACTransitionTrait {
     /// Get the hidden state.
     fn get_hidden_state(&self) -> &[f32];

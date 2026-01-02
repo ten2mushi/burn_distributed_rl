@@ -36,7 +36,7 @@ use distributed_rl::algorithms::action_policy::{DiscretePolicy, DiscretePolicyOu
 use distributed_rl::algorithms::actor_critic::{ActorCritic, ActorCriticInference, ForwardOutput};
 use distributed_rl::algorithms::temporal_policy::FeedForward;
 use distributed_rl::environment::CartPoleEnv;
-use distributed_rl::runners::{IMPALAConfig, IMPALADiscrete, IMPALARunner};
+use distributed_rl::runners::{IMPALAConfig, IMPALADiscrete};
 
 // ============================================================================
 // Backend Type

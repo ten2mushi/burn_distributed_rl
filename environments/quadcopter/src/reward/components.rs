@@ -3,7 +3,9 @@
 //! Each component is a zero-cost struct implementing [`RewardComponent`].
 
 use super::RewardComponent;
-use crate::constants::{rpm_to_action, HOVER_RPM};
+use crate::constants::rpm_to_action;
+#[cfg(test)]
+use crate::constants::HOVER_RPM;
 use crate::state::QuadcopterState;
 
 #[cfg(feature = "simd")]

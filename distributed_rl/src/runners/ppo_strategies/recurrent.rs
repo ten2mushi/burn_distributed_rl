@@ -577,7 +577,9 @@ where
 struct SequenceData {
     states: Vec<Vec<f32>>,
     actions: Vec<Action>,
+    #[allow(dead_code)]
     rewards: Vec<f32>,
+    #[allow(dead_code)]
     values: Vec<f32>,
     dones: Vec<bool>,
     /// Terminal flags (TRUE episode termination only, NOT truncated).
@@ -586,6 +588,7 @@ struct SequenceData {
     old_log_probs: Vec<f32>,
     old_values: Vec<f32>,
     initial_hidden: Vec<f32>,
+    #[allow(dead_code)]
     next_value: Option<f32>,
     advantages: Vec<f32>,
     returns: Vec<f32>,
@@ -593,6 +596,7 @@ struct SequenceData {
 
 impl SequenceData {
     /// Create sequence data from transitions.
+    #[allow(dead_code)]
     fn from_transitions(
         transitions: &[PPOTransition<RecurrentHiddenData>],
         next_value: Option<f32>,

@@ -38,7 +38,7 @@
 //! actor_normalizer.sync_with(&aggregated);
 //! ```
 
-use crate::core::{RunningMeanStd, SharedRunningMeanStd};
+use crate::core::RunningMeanStd;
 use burn::prelude::*;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -183,7 +183,7 @@ impl ObservationNormalizer {
     /// Normalized tensor of same shape
     pub fn normalize_tensor<B: Backend>(&self, obs: Tensor<B, 2>) -> Tensor<B, 2> {
         let device = obs.device();
-        let [batch_size, obs_dim] = obs.dims();
+        let [_batch_size, obs_dim] = obs.dims();
 
         // Get mean and std as tensors
         let mean: Vec<f32> = self.stats.mean().iter().map(|&x| x as f32).collect();

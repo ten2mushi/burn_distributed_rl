@@ -131,6 +131,7 @@ impl<T: Clone> RingBuffer<T> {
     }
 
     /// Check if empty.
+    #[allow(dead_code)]
     #[inline]
     fn is_empty(&self) -> bool {
         self.len == 0
@@ -144,6 +145,7 @@ impl<T: Clone> RingBuffer<T> {
     }
 
     /// Capacity.
+    #[allow(dead_code)]
     #[inline]
     fn capacity(&self) -> usize {
         self.capacity

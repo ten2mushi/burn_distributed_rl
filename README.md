@@ -1,12 +1,12 @@
 ## Locally distributed training of rl agents
 
 several crates:
-    - distributed_rl: rl agents training
-    - environments: environments for rl agents:
-        - quadcopter: quadcopter environment
-        - rf: radio frequency spectrum simulation for reinforcement learning
+- distributed_rl: rl agents training
+- environments: environments for rl agents:
+    - quadcopter: quadcopter environment
+    - rf: radio frequency spectrum simulation for reinforcement learning
 
-needs rust nightly (may need to use rustup default nightly)
+needs rust nightly (rustup default nightly)
 
 install:
 ```bash
@@ -43,3 +43,8 @@ changelog:
         - minibatch sequence shuffling
     - added quadcopter environment (crazyflie 2.0, x-configuration, rpm action space, 12D observation space, single agent, trajectory tracking, velocity control, batch environments, cpu simd, decoupled physics/control frequencies, episode termination, ground effect, kinematic observations, action buffer, supports_no_reset)
     - added rf environment (radio frequency spectrum simulation for reinforcement learning)
+
+
+![Quad environment viz](environments/quadcopter/examples/quad_env_viz.gif)
+
+![RF environment viz](environments/rf/examples/rf_env_viz.gif)
