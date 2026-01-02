@@ -268,6 +268,7 @@ impl Actor {
                                     },
                                     log_prob: lp,
                                     value: v,
+                                    bootstrap_value: None,
                                 }
                             })
                             .collect();
@@ -655,6 +656,7 @@ impl Actor {
                                     },
                                     log_prob: lp,
                                     value: v,
+                                    bootstrap_value: None,
                                 }
                             })
                             .collect();

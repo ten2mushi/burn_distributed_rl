@@ -255,11 +255,7 @@ where
     B: Backend,
 {
     ForwardOutput::new(
-        super::action_policy::ContinuousPolicyOutput {
-            mean,
-            log_std,
-            bounds,
-        },
+        super::action_policy::ContinuousPolicyOutput::new(mean, log_std, bounds),
         values,
         (),
     )
@@ -293,11 +289,7 @@ where
     B: Backend,
 {
     ForwardOutput::new(
-        super::action_policy::ContinuousPolicyOutput {
-            mean,
-            log_std,
-            bounds,
-        },
+        super::action_policy::ContinuousPolicyOutput::new(mean, log_std, bounds),
         values,
         hidden,
     )

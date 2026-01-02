@@ -752,3 +752,229 @@ fn test_gae_terminal_bounded_property() {
         }
     }
 }
+
+// ============================================================================
+// Property-Based Tests with Proptest
+// ============================================================================
+
+#[cfg(test)]
+mod proptest_gae {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generate reasonable reward values (not too extreme to avoid overflow)
+    fn reasonable_reward() -> impl Strategy<Value = f32> {
+        -100.0f32..100.0
+    }
+
+    /// Generate reasonable value estimates
+    fn reasonable_value() -> impl Strategy<Value = f32> {
+        -100.0f32..100.0
+    }
+
+    proptest! {
+        /// Property: GAE should always return finite values for reasonable inputs
+        #[test]
+        fn test_gae_always_finite(
+            rewards in prop::collection::vec(reasonable_reward(), 1..50),
+            gamma in 0.0f32..=1.0,
+            gae_lambda in 0.0f32..=1.0,
+            last_value in reasonable_value(),
+        ) {
+            let n = rewards.len();
+            let values: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1).collect();
+            let dones: Vec<bool> = (0..n).map(|_| false).collect();
+
+            let (advantages, returns) = compute_gae(
+                &rewards, &values, &dones, last_value, gamma, gae_lambda
+            );
+
+            // All advantages should be finite
+            for (i, a) in advantages.iter().enumerate() {
+                prop_assert!(
+                    a.is_finite(),
+                    "Advantage at {} should be finite, got {} (r={}, v={}, gamma={}, lambda={})",
+                    i, a, rewards[i], values[i], gamma, gae_lambda
+                );
+            }
+
+            // All returns should be finite
+            for (i, r) in returns.iter().enumerate() {
+                prop_assert!(
+                    r.is_finite(),
+                    "Return at {} should be finite, got {}",
+                    i, r
+                );
+            }
+        }
+
+        /// Property: Advantage normalization should produce bounded results
+        #[test]
+        fn test_normalization_bounded(
+            raw_advantages in prop::collection::vec(-1e6f32..1e6, 2..100),
+        ) {
+            let mut advantages = raw_advantages.clone();
+            normalize_advantages(&mut advantages);
+
+            // All normalized values should be finite
+            for (i, a) in advantages.iter().enumerate() {
+                prop_assert!(
+                    a.is_finite(),
+                    "Normalized advantage at {} should be finite, got {} (original was {})",
+                    i, a, raw_advantages[i]
+                );
+            }
+
+            // Normalized advantages should be roughly bounded (within ~10 std devs)
+            for a in &advantages {
+                prop_assert!(
+                    a.abs() < 50.0,
+                    "Normalized advantage should be bounded, got {} (likely numerical issue)",
+                    a
+                );
+            }
+
+            // Mean should be approximately zero
+            let mean: f32 = advantages.iter().sum::<f32>() / advantages.len() as f32;
+            prop_assert!(
+                mean.abs() < 1e-4,
+                "Normalized mean should be ~0, got {}",
+                mean
+            );
+        }
+
+        /// Property: Returns should equal advantages plus values (fundamental identity)
+        #[test]
+        fn test_returns_identity(
+            rewards in prop::collection::vec(reasonable_reward(), 1..30),
+            gamma in 0.5f32..1.0,
+            gae_lambda in 0.5f32..1.0,
+        ) {
+            let n = rewards.len();
+            let values: Vec<f32> = (0..n).map(|i| (i as f32 - n as f32 / 2.0) * 0.5).collect();
+            let dones: Vec<bool> = (0..n).map(|_| false).collect();
+
+            let (advantages, returns) = compute_gae(
+                &rewards, &values, &dones, 0.0, gamma, gae_lambda
+            );
+
+            for i in 0..n {
+                let expected_return = advantages[i] + values[i];
+                prop_assert!(
+                    (returns[i] - expected_return).abs() < 1e-4,
+                    "Return[{}] = {} should equal advantage + value = {} + {} = {}",
+                    i, returns[i], advantages[i], values[i], expected_return
+                );
+            }
+        }
+
+        /// Property: Terminal states break advantage propagation
+        #[test]
+        fn test_terminal_breaks_propagation(
+            reward_before in reasonable_reward(),
+            reward_after in reasonable_reward(),
+            value in reasonable_value(),
+            gamma in 0.9f32..1.0,
+            gae_lambda in 0.9f32..1.0,
+        ) {
+            // Two transitions: one ends terminal, one continues
+            let rewards = vec![reward_before, reward_after];
+            let values = vec![value, value];
+            let dones_terminal = vec![true, false];
+            let dones_continue = vec![false, false];
+
+            let (adv_term, _) = compute_gae(
+                &rewards, &values, &dones_terminal, value, gamma, gae_lambda
+            );
+            let (adv_cont, _) = compute_gae(
+                &rewards, &values, &dones_continue, value, gamma, gae_lambda
+            );
+
+            // The second advantage should be the same (doesn't depend on first step's done)
+            prop_assert!(
+                (adv_term[1] - adv_cont[1]).abs() < 1e-4,
+                "Second advantage should be same regardless of first step done: {} vs {}",
+                adv_term[1], adv_cont[1]
+            );
+
+            // The first advantage should be different because terminal zeroes next_value
+            // (unless by chance the values work out the same, which is rare)
+            // Actually, when done[0]=true, the advantage at t=0 doesn't propagate to t=1,
+            // but the calculation at t=0 itself differs because we zero next_value
+            let delta_0_term = reward_before + gamma * 0.0 - value; // done zeroes next_value
+            let delta_0_cont = reward_before + gamma * value - value;
+
+            prop_assert!(
+                (adv_term[0] - delta_0_term).abs() < 1e-4,
+                "Terminal first advantage should be r - V = {}, got {}",
+                delta_0_term, adv_term[0]
+            );
+        }
+
+        /// Property: GAE vectorized should match single-env GAE
+        #[test]
+        fn test_vectorized_matches_single(
+            rewards_env0 in prop::collection::vec(reasonable_reward(), 3..10),
+            rewards_env1 in prop::collection::vec(reasonable_reward(), 3..10),
+            gamma in 0.9f32..1.0,
+            gae_lambda in 0.9f32..1.0,
+        ) {
+            // Use same length for both envs
+            let n_steps = rewards_env0.len().min(rewards_env1.len());
+            let rewards_env0: Vec<f32> = rewards_env0.into_iter().take(n_steps).collect();
+            let rewards_env1: Vec<f32> = rewards_env1.into_iter().take(n_steps).collect();
+
+            let values_env0: Vec<f32> = (0..n_steps).map(|i| i as f32 * 0.1).collect();
+            let values_env1: Vec<f32> = (0..n_steps).map(|i| i as f32 * 0.2).collect();
+            let dones_env0: Vec<bool> = vec![false; n_steps];
+            let dones_env1: Vec<bool> = vec![false; n_steps];
+            let last_value_0 = 0.5;
+            let last_value_1 = 1.0;
+
+            // Single env computation
+            let (single_adv_0, _) = compute_gae(
+                &rewards_env0, &values_env0, &dones_env0, last_value_0, gamma, gae_lambda
+            );
+            let (single_adv_1, _) = compute_gae(
+                &rewards_env1, &values_env1, &dones_env1, last_value_1, gamma, gae_lambda
+            );
+
+            // Interleave for vectorized
+            let mut interleaved_rewards = Vec::with_capacity(n_steps * 2);
+            let mut interleaved_values = Vec::with_capacity(n_steps * 2);
+            let mut interleaved_dones = Vec::with_capacity(n_steps * 2);
+            for t in 0..n_steps {
+                interleaved_rewards.push(rewards_env0[t]);
+                interleaved_rewards.push(rewards_env1[t]);
+                interleaved_values.push(values_env0[t]);
+                interleaved_values.push(values_env1[t]);
+                interleaved_dones.push(dones_env0[t]);
+                interleaved_dones.push(dones_env1[t]);
+            }
+
+            let (vec_adv, _) = compute_gae_vectorized(
+                &interleaved_rewards,
+                &interleaved_values,
+                &interleaved_dones,
+                &[last_value_0, last_value_1],
+                2,
+                gamma,
+                gae_lambda,
+            );
+
+            // Extract and compare
+            for t in 0..n_steps {
+                prop_assert!(
+                    (vec_adv[t * 2] - single_adv_0[t]).abs() < 1e-4,
+                    "Env0 step {} mismatch: vec={}, single={}",
+                    t, vec_adv[t * 2], single_adv_0[t]
+                );
+                prop_assert!(
+                    (vec_adv[t * 2 + 1] - single_adv_1[t]).abs() < 1e-4,
+                    "Env1 step {} mismatch: vec={}, single={}",
+                    t, vec_adv[t * 2 + 1], single_adv_1[t]
+                );
+            }
+        }
+    }
+}

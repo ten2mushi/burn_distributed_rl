@@ -42,6 +42,7 @@ fn make_ppo_transitions(n: usize) -> Vec<PPOTransition> {
             ),
             log_prob: -(i as f32 + 1.0).ln(),
             value: i as f32 * 0.5,
+            bootstrap_value: None,
         })
         .collect()
 }
@@ -60,6 +61,7 @@ fn make_ppo_transition_for_env(env_id: usize, step: usize) -> PPOTransition {
         ),
         log_prob: -0.5,
         value: 1.0 + (step as f32) * 0.1,
+        bootstrap_value: None,
     }
 }
 
@@ -76,6 +78,7 @@ fn make_terminal_ppo_transition(env_id: usize, step: usize) -> PPOTransition {
         ),
         log_prob: -0.5,
         value: 0.0,
+        bootstrap_value: None,
     }
 }
 
@@ -92,6 +95,7 @@ fn make_truncated_ppo_transition(env_id: usize, step: usize) -> PPOTransition {
         ),
         log_prob: -0.5,
         value: 0.5, // Bootstrap value for truncation
+        bootstrap_value: None,
     }
 }
 
@@ -542,11 +546,13 @@ mod rollout_buffer_tests {
                 base: Transition::new_discrete(vec![0.0], 0, 1.0, vec![1.0], false, false),
                 log_prob: -0.1,
                 value: 0.5,
+                bootstrap_value: None,
             },
             PPOTransition {
                 base: Transition::new_discrete(vec![1.0], 1, 2.0, vec![2.0], false, false),
                 log_prob: -0.2,
                 value: 0.6,
+                bootstrap_value: None,
             },
         ];
         buffer.push_step(transitions);
@@ -579,6 +585,7 @@ mod rollout_buffer_tests {
             ),
             log_prob: -0.5,
             value: 1.0,
+            bootstrap_value: None,
         };
         buffer.push_step(vec![transition]);
 
@@ -647,6 +654,7 @@ mod rollout_buffer_tests {
             ),
             log_prob: -0.5,
             value: 1.0,
+            bootstrap_value: None,
         };
         buffer.push_step(vec![transition]);
 
@@ -2373,6 +2381,7 @@ mod edge_case_tests {
             base: Transition::new_discrete(vec![0.0], 0, 0.0, vec![1.0], false, false),
             log_prob: 0.0,
             value: 0.0,
+            bootstrap_value: None,
         };
         buffer.push_step(vec![transition]);
 
@@ -2427,6 +2436,7 @@ mod edge_case_tests {
             base: Transition::new_discrete(vec![0.0], 0, -10.5, vec![1.0], false, false),
             log_prob: -2.3,
             value: -5.0,
+            bootstrap_value: None,
         };
         buffer.push_step(vec![transition]);
 

@@ -1,0 +1,33 @@
+[package]
+name = "quadcopter-env"
+version = "0.1.0"
+edition = "2021"
+description = "SIMD-optimized quadcopter RL environment for distributed training"
+license = "MIT"
+
+[features]
+default = []
+simd = []                           # Enable SIMD optimizations (requires nightly)
+parallel = ["rayon"]                # Enable multi-threaded parallel execution
+distributed_rl = ["dep:distributed_rl"]  # Enable distributed_rl integration
+
+# Rendering features
+render = ["dep:plotters", "dep:image"]
+render-realtime = ["render", "dep:minifb"]
+render-gif = ["render", "dep:gif"]
+
+[dependencies]
+operant-core = { path = "../../operant_fork/operant/crates/operant-core" }
+distributed_rl = { path = "../../distributed_rl", optional = true }
+rand = "0.8"
+fastrand = "2.0"
+rayon = { version = "1.8", optional = true }
+
+# Rendering dependencies (optional)
+plotters = { version = "0.3", optional = true, default-features = false, features = ["bitmap_encoder", "bitmap_backend", "ttf"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+minifb = { version = "0.27", optional = true }
+gif = { version = "0.13", optional = true }
+
+[dev-dependencies]
+approx = "0.5"

@@ -108,6 +108,7 @@ impl From<Vec<f32>> for ContinuousAction {
 /// It provides methods for both:
 /// - Rollout collection: [`sample`] (detached, returns scalar actions)
 /// - Training: [`log_prob`], [`entropy`] (with gradient flow)
+/// - Full distribution access: [`action_probs`], [`all_log_probs`] (for discrete policies)
 pub trait PolicyOutput<B: Backend>: Clone + Send + 'static {
     /// The action value type produced by sampling this policy.
     type Action: ActionValue;
@@ -129,6 +130,46 @@ pub trait PolicyOutput<B: Backend>: Clone + Send + 'static {
 
     /// Compute entropy for regularization (with gradient flow).
     fn entropy(&self) -> Tensor<B, 1>;
+
+    // ========================================================================
+    // Full Distribution Access (for algorithms like SAC-Discrete, TRPO, etc.)
+    // ========================================================================
+
+    /// Get action probabilities for all actions (discrete policies only).
+    ///
+    /// Returns `Some([batch, n_actions])` for discrete policies,
+    /// `None` for continuous policies (infinite action space).
+    ///
+    /// Used by algorithms that need the full distribution:
+    /// - SAC-Discrete: E_a[Q(s,a) - α*log π(a|s)]
+    /// - Policy distillation
+    /// - Full KL divergence computation
+    fn action_probs(&self) -> Option<Tensor<B, 2>> {
+        None
+    }
+
+    /// Get log probabilities for all actions (discrete policies only).
+    ///
+    /// Returns `Some([batch, n_actions])` for discrete policies,
+    /// `None` for continuous policies.
+    ///
+    /// More numerically stable than `action_probs().log()` for small probabilities.
+    fn all_log_probs(&self) -> Option<Tensor<B, 2>> {
+        None
+    }
+
+    /// Get the number of discrete actions (discrete policies only).
+    ///
+    /// Returns `Some(n_actions)` for discrete policies,
+    /// `None` for continuous policies.
+    fn num_actions(&self) -> Option<usize> {
+        None
+    }
+
+    /// Check if this is a discrete policy.
+    fn is_discrete(&self) -> bool {
+        self.num_actions().is_some()
+    }
 }
 
 // ============================================================================
@@ -228,6 +269,24 @@ impl<B: Backend> PolicyOutput<B> for DiscretePolicyOutput<B> {
         let neg_entropy: Tensor<B, 2> = (probs * log_probs).sum_dim(1);
         -neg_entropy.flatten(0, 1)
     }
+
+    // ========================================================================
+    // Full Distribution Access (discrete-specific implementations)
+    // ========================================================================
+
+    fn action_probs(&self) -> Option<Tensor<B, 2>> {
+        Some(self.probs())
+    }
+
+    fn all_log_probs(&self) -> Option<Tensor<B, 2>> {
+        // Use log_softmax for numerical stability (avoids log(softmax(x)))
+        // log_softmax(x) = x - log(sum(exp(x)))
+        Some(burn::tensor::activation::log_softmax(self.logits.clone(), 1))
+    }
+
+    fn num_actions(&self) -> Option<usize> {
+        Some(self.n_actions())
+    }
 }
 
 // ============================================================================
@@ -243,16 +302,40 @@ pub struct ContinuousPolicyOutput<B: Backend> {
     pub log_std: Tensor<B, 2>,
     /// Action bounds for scaling: (low, high)
     pub bounds: (Vec<f32>, Vec<f32>),
+    /// Minimum log_std to prevent exploration collapse.
+    /// Default: -2.0 (exp(-2) = 0.135, 13.5% minimum std).
+    pub log_std_floor: f32,
 }
 
+/// Default log_std floor for continuous policies.
+const DEFAULT_LOG_STD_FLOOR: f32 = -2.0;
+/// Maximum log_std for continuous policies.
+const LOG_STD_MAX: f32 = 2.0;
+
 impl<B: Backend> ContinuousPolicyOutput<B> {
-    /// Create from mean and log_std tensors.
+    /// Create from mean and log_std tensors with default floor.
     pub fn new(mean: Tensor<B, 2>, log_std: Tensor<B, 2>, bounds: (Vec<f32>, Vec<f32>)) -> Self {
+        Self::with_floor(mean, log_std, bounds, DEFAULT_LOG_STD_FLOOR)
+    }
+
+    /// Create from mean and log_std tensors with custom floor.
+    pub fn with_floor(
+        mean: Tensor<B, 2>,
+        log_std: Tensor<B, 2>,
+        bounds: (Vec<f32>, Vec<f32>),
+        log_std_floor: f32,
+    ) -> Self {
         Self {
             mean,
             log_std,
             bounds,
+            log_std_floor,
         }
+    }
+
+    /// Get clamped log_std tensor (applies floor and ceiling).
+    fn clamped_log_std(&self) -> Tensor<B, 2> {
+        self.log_std.clone().clamp(self.log_std_floor, LOG_STD_MAX)
     }
 
     /// Action dimension.
@@ -270,9 +353,9 @@ impl<B: Backend> PolicyOutput<B> for ContinuousPolicyOutput<B> {
     type Action = ContinuousAction;
 
     fn sample(&self, _device: &B::Device) -> (Vec<Self::Action>, Vec<f32>) {
-        // Sample using squashed Gaussian
+        // Sample using squashed Gaussian with clamped log_std
         let (squashed, log_probs_tensor) =
-            sample_squashed_gaussian(self.mean.clone(), self.log_std.clone());
+            sample_squashed_gaussian(self.mean.clone(), self.clamped_log_std());
 
         // Scale to action bounds
         let scaled = scale_action(squashed, &self.bounds.0, &self.bounds.1);
@@ -324,13 +407,13 @@ impl<B: Backend> PolicyOutput<B> for ContinuousPolicyOutput<B> {
             &self.bounds.1,
         );
 
-        // Compute log prob with squashed Gaussian
-        log_prob_squashed_gaussian(unscaled, self.mean.clone(), self.log_std.clone())
+        // Compute log prob with squashed Gaussian using clamped log_std
+        log_prob_squashed_gaussian(unscaled, self.mean.clone(), self.clamped_log_std())
     }
 
     fn entropy(&self) -> Tensor<B, 1> {
-        // Analytical Gaussian entropy (ignoring tanh correction for entropy bonus)
-        entropy_gaussian(self.log_std.clone())
+        // Analytical Gaussian entropy using clamped log_std
+        entropy_gaussian(self.clamped_log_std())
     }
 }
 
@@ -372,6 +455,16 @@ pub trait ActionPolicy<B: Backend>: Clone + Send + Sync + 'static {
     fn actions_to_floats(&self, actions: &[Self::Action]) -> Vec<f32> {
         actions.iter().flat_map(|a| a.as_floats()).collect()
     }
+
+    /// Returns true if this is a discrete action policy.
+    ///
+    /// Used to correctly store actions in transitions:
+    /// - Discrete: Store as `Action::Discrete(index)`
+    /// - Continuous: Store as `Action::Continuous(floats)`
+    ///
+    /// This is important because continuous action spaces can have dimension 1
+    /// (e.g., Pendulum), so we can't use action dimension to determine type.
+    fn is_discrete() -> bool;
 }
 
 // ============================================================================
@@ -416,6 +509,10 @@ impl<B: Backend> ActionPolicy<B> for DiscretePolicy {
         let batch_size = actions.len();
         let action_indices: Vec<f32> = actions.iter().map(|a| a.0 as f32).collect();
         Tensor::<B, 1>::from_floats(action_indices.as_slice(), device).reshape([batch_size, 1])
+    }
+
+    fn is_discrete() -> bool {
+        true
     }
 }
 
@@ -480,6 +577,10 @@ impl<B: Backend> ActionPolicy<B> for ContinuousPolicy {
         let action_floats: Vec<f32> = actions.iter().flat_map(|a| a.0.clone()).collect();
         Tensor::<B, 1>::from_floats(action_floats.as_slice(), device)
             .reshape([batch_size, self.action_dim])
+    }
+
+    fn is_discrete() -> bool {
+        false
     }
 }
 

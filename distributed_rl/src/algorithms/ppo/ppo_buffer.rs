@@ -1,378 +1,432 @@
-//! PPO-specific rollout buffer implementing ExperienceBuffer trait.
+//! Generic per-environment rollout buffer for PPO training.
 //!
-//! This buffer is designed for on-policy algorithms where the entire
-//! rollout is consumed after each training iteration.
+//! This buffer stores transitions organized by environment ID, which is
+//! essential for computing GAE correctly in a multi-actor setting. Each
+//! environment's trajectory must be processed independently for proper
+//! advantage estimation.
+//!
+//! # Design
+//!
+//! The buffer is generic over `Trans: PPOTransitionTrait`, enabling:
+//! - `PPOBuffer<PPOTransitionFF>` for feed-forward policies
+//! - `PPOBuffer<PPOTransitionRecurrent>` for recurrent policies
+//!
+//! Both use the exact same buffer logic, differing only in transition storage.
 
-use crate::core::experience_buffer::{ExperienceBuffer, OnPolicyBuffer};
-use crate::core::transition::PPOTransition;
-use crossbeam_channel::{bounded, Receiver, Sender};
-use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use super::ppo_transition::{
+    PPOTransitionFF, PPOTransitionTrait, PPOTransitionRecurrent,
+};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Configuration for PPO rollout buffer.
-#[derive(Debug, Clone)]
-pub struct PPORolloutBufferConfig {
-    /// Number of actor threads.
-    pub n_actors: usize,
-    /// Environments per actor.
-    pub n_envs_per_actor: usize,
-    /// Steps per rollout per environment.
-    pub rollout_length: usize,
-}
+// ============================================================================
+// PPOBuffer
+// ============================================================================
 
-impl Default for PPORolloutBufferConfig {
-    fn default() -> Self {
-        Self {
-            n_actors: 4,
-            n_envs_per_actor: 32,
-            rollout_length: 128,
-        }
-    }
-}
-
-impl PPORolloutBufferConfig {
-    /// Total environments across all actors.
-    pub fn total_envs(&self) -> usize {
-        self.n_actors * self.n_envs_per_actor
-    }
-
-    /// Expected capacity when full.
-    pub fn capacity(&self) -> usize {
-        self.total_envs() * self.rollout_length
-    }
-}
-
-/// PPO rollout batch ready for training.
-#[derive(Debug, Clone)]
-pub struct PPORolloutBatch {
-    /// All transitions from the rollout.
-    pub transitions: Vec<PPOTransition>,
-    /// Policy version when data was collected.
-    pub policy_version: u64,
-    /// Number of environments.
-    pub n_envs: usize,
-    /// Rollout length.
-    pub rollout_length: usize,
-}
-
-impl PPORolloutBatch {
-    /// Get all states as flat vector.
-    pub fn states(&self) -> Vec<f32> {
-        self.transitions
-            .iter()
-            .flat_map(|t| t.base.state.iter().copied())
-            .collect()
-    }
-
-    /// Get all next states.
-    pub fn next_states(&self) -> Vec<f32> {
-        self.transitions
-            .iter()
-            .flat_map(|t| t.base.next_state.iter().copied())
-            .collect()
-    }
-
-    /// Get all rewards.
-    pub fn rewards(&self) -> Vec<f32> {
-        self.transitions.iter().map(|t| t.base.reward).collect()
-    }
-
-    /// Get all values.
-    pub fn values(&self) -> Vec<f32> {
-        self.transitions.iter().map(|t| t.value).collect()
-    }
-
-    /// Get all log probs.
-    pub fn log_probs(&self) -> Vec<f32> {
-        self.transitions.iter().map(|t| t.log_prob).collect()
-    }
-
-    /// Get all done flags.
-    pub fn dones(&self) -> Vec<bool> {
-        self.transitions.iter().map(|t| t.done()).collect()
-    }
-
-    /// Number of transitions.
-    pub fn len(&self) -> usize {
-        self.transitions.len()
-    }
-
-    /// Check if empty.
-    pub fn is_empty(&self) -> bool {
-        self.transitions.is_empty()
-    }
-
-    /// State dimension (inferred from first transition).
-    pub fn state_dim(&self) -> usize {
-        self.transitions.first().map(|t| t.base.state.len()).unwrap_or(0)
-    }
-}
-
-/// Thread-safe rollout buffer for distributed PPO.
+/// Per-environment rollout buffer for unified distributed PPO.
 ///
-/// Actors push transitions, and the learner drains the entire buffer
-/// after each rollout is complete.
-pub struct PPORolloutBuffer {
-    config: PPORolloutBufferConfig,
-    /// Storage for transitions.
-    storage: RwLock<Vec<PPOTransition>>,
-    /// Current step count (vectorized steps, not individual transitions).
-    step_count: AtomicUsize,
-    /// Ready flag.
-    ready: AtomicBool,
-    /// Policy version of collected data.
-    policy_version: AtomicU64,
-    /// Ready signal channel.
-    ready_tx: Sender<()>,
-    ready_rx: Receiver<()>,
+/// Unlike a flat buffer, this stores transitions organized by environment,
+/// enabling correct per-environment GAE computation. This is critical for
+/// distributed training where actors push transitions asynchronously.
+///
+/// # Type Parameters
+///
+/// - `Trans`: Transition type implementing `PPOTransitionTrait`
+///
+/// # Thread Safety
+///
+/// Uses `parking_lot::Mutex` for fast locking. Actors push transitions
+/// with their global env offset, and the learner consumes all at once.
+pub struct PPOBuffer<Trans: PPOTransitionTrait> {
+    /// Per-environment rollout storage: `envs[global_env_id] = Vec<Trans>`
+    envs: Mutex<Vec<Vec<Trans>>>,
+    /// Rollout length per environment
+    rollout_length: usize,
+    /// Total number of environments across all actors
+    total_envs: usize,
+    /// Step counts per environment
+    step_counts: Mutex<Vec<usize>>,
+    /// Current consumed epoch (for synchronization)
+    consumed_epoch: AtomicU64,
 }
 
-impl PPORolloutBuffer {
-    /// Create a new PPO rollout buffer.
-    pub fn new(config: PPORolloutBufferConfig) -> Self {
-        let capacity = config.capacity();
-        let (ready_tx, ready_rx) = bounded(1);
-
-        Self {
-            config,
-            storage: RwLock::new(Vec::with_capacity(capacity)),
-            step_count: AtomicUsize::new(0),
-            ready: AtomicBool::new(false),
-            policy_version: AtomicU64::new(0),
-            ready_tx,
-            ready_rx,
-        }
-    }
-
-    /// Push a batch of transitions from one vectorized step.
+impl<Trans: PPOTransitionTrait> PPOBuffer<Trans> {
+    /// Create a new unified PPO buffer.
     ///
-    /// Called by actors after stepping their environments.
-    pub fn push_step(&self, transitions: Vec<PPOTransition>, version: u64) {
-        let mut storage = self.storage.write();
-        storage.extend(transitions);
-
-        // Update policy version (take the most recent)
-        self.policy_version.fetch_max(version, Ordering::Relaxed);
-
-        let count = self.step_count.fetch_add(1, Ordering::SeqCst) + 1;
-
-        // Check if rollout is complete
-        if count >= self.config.rollout_length {
-            self.ready.store(true, Ordering::Release);
-            let _ = self.ready_tx.try_send(());
+    /// # Arguments
+    ///
+    /// * `rollout_length` - Steps to collect per environment
+    /// * `total_envs` - Total environments across all actors
+    pub fn new(rollout_length: usize, total_envs: usize) -> Self {
+        Self {
+            envs: Mutex::new(
+                (0..total_envs)
+                    .map(|_| Vec::with_capacity(rollout_length))
+                    .collect(),
+            ),
+            rollout_length,
+            total_envs,
+            step_counts: Mutex::new(vec![0; total_envs]),
+            consumed_epoch: AtomicU64::new(0),
         }
     }
 
-    /// Wait for rollout to be ready (blocking).
-    pub fn wait_ready(&self) -> bool {
-        self.ready_rx.recv().is_ok()
-    }
+    /// Push a batch of transitions from one actor's step.
+    ///
+    /// Each transition is stored in its corresponding environment's rollout.
+    ///
+    /// # Arguments
+    ///
+    /// * `transitions` - One transition per environment in this actor
+    /// * `global_env_offset` - Starting global env ID for this actor
+    ///                         (e.g., actor 2 with 32 envs/actor has offset 64)
+    pub fn push_batch(&self, transitions: Vec<Trans>, global_env_offset: usize) {
+        let mut envs = self.envs.lock();
+        let mut counts = self.step_counts.lock();
 
-    /// Wait for rollout with timeout.
-    pub fn wait_ready_timeout(&self, timeout: std::time::Duration) -> bool {
-        self.ready_rx.recv_timeout(timeout).is_ok()
-    }
-
-    /// Consume the rollout and return a batch.
-    pub fn consume(&self) -> PPORolloutBatch {
-        let mut storage = self.storage.write();
-        self.step_count.store(0, Ordering::SeqCst);
-        self.ready.store(false, Ordering::Release);
-
-        let version = self.policy_version.load(Ordering::Relaxed);
-
-        PPORolloutBatch {
-            transitions: std::mem::take(&mut *storage),
-            policy_version: version,
-            n_envs: self.config.total_envs(),
-            rollout_length: self.config.rollout_length,
+        for (local_idx, transition) in transitions.into_iter().enumerate() {
+            let global_env_id = global_env_offset + local_idx;
+            if global_env_id < self.total_envs && counts[global_env_id] < self.rollout_length {
+                envs[global_env_id].push(transition);
+                counts[global_env_id] += 1;
+            }
         }
     }
 
-    /// Get current step count.
-    pub fn step_count(&self) -> usize {
-        self.step_count.load(Ordering::Relaxed)
+    /// Check if the rollout is complete (all envs have rollout_length transitions).
+    pub fn is_ready(&self) -> bool {
+        let counts = self.step_counts.lock();
+        counts.iter().all(|&c| c >= self.rollout_length)
     }
 
-    /// Check if ready.
-    pub fn is_rollout_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+    /// Get current progress as (min_steps, total_envs).
+    pub fn progress(&self) -> (usize, usize) {
+        let counts = self.step_counts.lock();
+        let min = counts.iter().copied().min().unwrap_or(0);
+        (min, self.total_envs)
     }
 
-    /// Get configuration.
-    pub fn config(&self) -> &PPORolloutBufferConfig {
-        &self.config
+    /// Total transitions currently stored.
+    pub fn total_transitions(&self) -> usize {
+        self.step_counts.lock().iter().sum()
+    }
+
+    /// Consume all rollouts, returning per-environment rollouts.
+    ///
+    /// This resets the buffer for the next rollout. Returns a vector where
+    /// each element is one environment's complete rollout.
+    ///
+    /// # Returns
+    ///
+    /// `Vec<Vec<Trans>>` - rollouts[env_id] = transitions for that env
+    pub fn consume(&self) -> Vec<Vec<Trans>> {
+        let mut envs = self.envs.lock();
+        let mut counts = self.step_counts.lock();
+
+        // Take all rollouts and reset
+        let rollouts = std::mem::replace(
+            &mut *envs,
+            (0..self.total_envs)
+                .map(|_| Vec::with_capacity(self.rollout_length))
+                .collect(),
+        );
+        *counts = vec![0; self.total_envs];
+
+        // Increment consumed epoch for synchronization
+        self.consumed_epoch.fetch_add(1, Ordering::Release);
+
+        rollouts
+    }
+
+    /// Get current consumed epoch.
+    ///
+    /// Actors use this to synchronize - they wait until `consumed_epoch > their_epoch`
+    /// before collecting more data.
+    pub fn consumed_epoch(&self) -> u64 {
+        self.consumed_epoch.load(Ordering::Acquire)
+    }
+
+    /// Clear the buffer without consuming.
+    pub fn clear(&self) {
+        let mut envs = self.envs.lock();
+        let mut counts = self.step_counts.lock();
+
+        for env_rollout in envs.iter_mut() {
+            env_rollout.clear();
+        }
+        *counts = vec![0; self.total_envs];
+    }
+
+    /// Get configuration info.
+    pub fn rollout_length(&self) -> usize {
+        self.rollout_length
+    }
+
+    /// Get total environments.
+    pub fn total_envs(&self) -> usize {
+        self.total_envs
     }
 }
 
-// Implement ExperienceBuffer trait
-impl ExperienceBuffer for PPORolloutBuffer {
-    type Item = PPOTransition;
+// ============================================================================
+// Type Aliases
+// ============================================================================
 
-    fn push(&self, item: Self::Item) {
-        let mut storage = self.storage.write();
-        storage.push(item);
+/// Feed-forward PPO buffer (transitions without hidden state).
+pub type PPOBufferFF = PPOBuffer<PPOTransitionFF>;
 
-        // Check completion based on total items
-        let total_envs = self.config.total_envs();
-        if storage.len() >= self.config.rollout_length * total_envs {
-            self.ready.store(true, Ordering::Release);
-            let _ = self.ready_tx.try_send(());
+/// Recurrent PPO buffer (transitions with hidden state).
+pub type PPOBufferRecurrent = PPOBuffer<PPOTransitionRecurrent>;
+
+// ============================================================================
+// PPORollouts
+// ============================================================================
+
+/// Batch of per-environment rollouts ready for training.
+///
+/// Contains all rollouts organized by environment, along with metadata
+/// needed for training (GAE computation, etc.).
+#[derive(Debug, Clone)]
+pub struct PPORollouts<Trans: PPOTransitionTrait> {
+    /// Per-environment rollouts: `rollouts[env_id] = transitions`
+    pub rollouts: Vec<Vec<Trans>>,
+    /// Total number of environments
+    pub n_envs: usize,
+    /// Rollout length per environment
+    pub rollout_length: usize,
+}
+
+impl<Trans: PPOTransitionTrait> PPORollouts<Trans> {
+    /// Create from consumed buffer data.
+    pub fn new(rollouts: Vec<Vec<Trans>>, rollout_length: usize) -> Self {
+        let n_envs = rollouts.len();
+        Self {
+            rollouts,
+            n_envs,
+            rollout_length,
         }
     }
 
-    fn push_batch(&self, items: Vec<Self::Item>) {
-        let mut storage = self.storage.write();
-        storage.extend(items);
-
-        let total_envs = self.config.total_envs();
-        if storage.len() >= self.config.rollout_length * total_envs {
-            self.ready.store(true, Ordering::Release);
-            let _ = self.ready_tx.try_send(());
-        }
+    /// Total number of transitions.
+    pub fn total_transitions(&self) -> usize {
+        self.rollouts.iter().map(|r| r.len()).sum()
     }
 
-    fn len(&self) -> usize {
-        self.storage.read().len()
+    /// Filter out empty rollouts (for robustness).
+    pub fn non_empty_rollouts(&self) -> impl Iterator<Item = (usize, &Vec<Trans>)> {
+        self.rollouts
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.is_empty())
     }
 
-    fn capacity(&self) -> usize {
-        self.config.capacity()
-    }
-
-    fn consolidate(&self) {
-        // No-op for rollout buffer (no injector to consolidate)
-    }
-
-    fn clear(&self) {
-        let mut storage = self.storage.write();
-        storage.clear();
-        self.step_count.store(0, Ordering::SeqCst);
-        self.ready.store(false, Ordering::Release);
+    /// Get observation dimension (from first transition).
+    pub fn obs_dim(&self) -> Option<usize> {
+        self.rollouts
+            .iter()
+            .find(|r| !r.is_empty())
+            .and_then(|r| r.first())
+            .map(|t| t.state().len())
     }
 }
 
-// Implement OnPolicyBuffer trait
-impl OnPolicyBuffer for PPORolloutBuffer {
-    fn is_ready(&self, min_steps: usize) -> bool {
-        self.len() >= min_steps || self.is_rollout_ready()
-    }
-
-    fn drain(&self) -> Vec<Self::Item> {
-        let mut storage = self.storage.write();
-        self.step_count.store(0, Ordering::SeqCst);
-        self.ready.store(false, Ordering::Release);
-        std::mem::take(&mut *storage)
-    }
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algorithms::ppo::ppo_transition::PPOTransition;
     use crate::core::transition::Transition;
 
-    fn make_transition(i: usize) -> PPOTransition {
-        PPOTransition {
-            base: Transition::new_discrete(
-                vec![i as f32],
+    fn make_ff_transition(env_id: usize, step: usize) -> PPOTransitionFF {
+        PPOTransitionFF::feed_forward(
+            Transition::new_discrete(
+                vec![env_id as f32, step as f32],
                 0,
                 1.0,
-                vec![(i + 1) as f32],
+                vec![env_id as f32, (step + 1) as f32],
                 false,
                 false,
             ),
-            log_prob: -0.5,
-            value: 1.0,
-        }
+            -0.5,
+            1.0,
+            None,
+        )
+    }
+
+    fn make_rec_transition(
+        env_id: usize,
+        step: usize,
+        seq_id: u64,
+    ) -> PPOTransitionRecurrent {
+        PPOTransitionRecurrent::recurrent(
+            Transition::new_discrete(
+                vec![env_id as f32, step as f32],
+                0,
+                1.0,
+                vec![env_id as f32, (step + 1) as f32],
+                false,
+                false,
+            ),
+            -0.5,
+            1.0,
+            None,
+            vec![0.1, 0.2, 0.3, 0.4], // hidden state
+            seq_id,
+            step as u32,
+            step == 0,
+        )
     }
 
     #[test]
-    fn test_ppo_buffer_new() {
-        let config = PPORolloutBufferConfig {
-            n_actors: 2,
-            n_envs_per_actor: 4,
-            rollout_length: 10,
-        };
-        let buffer = PPORolloutBuffer::new(config);
-
-        assert!(buffer.is_empty());
-        assert!(!buffer.is_rollout_ready());
-        assert_eq!(buffer.capacity(), 80); // 2 * 4 * 10
+    fn test_ff_buffer_creation() {
+        let buffer = PPOBufferFF::new(64, 128);
+        assert_eq!(buffer.rollout_length(), 64);
+        assert_eq!(buffer.total_envs(), 128);
+        assert!(!buffer.is_ready());
+        assert_eq!(buffer.total_transitions(), 0);
     }
 
     #[test]
-    fn test_ppo_buffer_push_and_consume() {
-        let config = PPORolloutBufferConfig {
-            n_actors: 1,
-            n_envs_per_actor: 2,
-            rollout_length: 3,
-        };
-        let buffer = PPORolloutBuffer::new(config);
+    fn test_rec_buffer_creation() {
+        let buffer = PPOBufferRecurrent::new(64, 128);
+        assert_eq!(buffer.rollout_length(), 64);
+        assert_eq!(buffer.total_envs(), 128);
+        assert!(!buffer.is_ready());
+    }
 
-        // Push 3 steps (6 transitions total)
-        for step in 0..3 {
-            let transitions = vec![
-                make_transition(step * 2),
-                make_transition(step * 2 + 1),
-            ];
-            buffer.push_step(transitions, 1);
-        }
+    #[test]
+    fn test_ff_push_batch() {
+        // 2 actors, 2 envs each, rollout length 3
+        let buffer = PPOBufferFF::new(3, 4);
 
-        assert!(buffer.is_rollout_ready());
-        assert_eq!(buffer.len(), 6);
+        // Actor 0 (envs 0-1) pushes step 0
+        buffer.push_batch(
+            vec![make_ff_transition(0, 0), make_ff_transition(1, 0)],
+            0, // global offset
+        );
+        assert_eq!(buffer.total_transitions(), 2);
 
-        let batch = buffer.consume();
-        assert_eq!(batch.len(), 6);
-        assert_eq!(batch.policy_version, 1);
+        // Actor 1 (envs 2-3) pushes step 0
+        buffer.push_batch(
+            vec![make_ff_transition(2, 0), make_ff_transition(3, 0)],
+            2, // global offset
+        );
+        assert_eq!(buffer.total_transitions(), 4);
+
+        // Not ready yet (need 3 steps per env)
+        assert!(!buffer.is_ready());
+    }
+
+    #[test]
+    fn test_rec_push_batch() {
+        let buffer = PPOBufferRecurrent::new(2, 2);
+
+        buffer.push_batch(
+            vec![
+                make_rec_transition(0, 0, 100),
+                make_rec_transition(1, 0, 101),
+            ],
+            0,
+        );
+        assert_eq!(buffer.total_transitions(), 2);
+    }
+
+    #[test]
+    fn test_rollout_completion() {
+        let buffer = PPOBufferFF::new(2, 2);
+
+        // Step 0
+        buffer.push_batch(
+            vec![make_ff_transition(0, 0), make_ff_transition(1, 0)],
+            0,
+        );
+        assert!(!buffer.is_ready());
+
+        // Step 1
+        buffer.push_batch(
+            vec![make_ff_transition(0, 1), make_ff_transition(1, 1)],
+            0,
+        );
+        assert!(buffer.is_ready());
+    }
+
+    #[test]
+    fn test_consume() {
+        let buffer = PPOBufferFF::new(2, 2);
+
+        // Fill buffer
+        buffer.push_batch(
+            vec![make_ff_transition(0, 0), make_ff_transition(1, 0)],
+            0,
+        );
+        buffer.push_batch(
+            vec![make_ff_transition(0, 1), make_ff_transition(1, 1)],
+            0,
+        );
+
+        assert!(buffer.is_ready());
+
+        // Consume
+        let rollouts = buffer.consume();
+        assert_eq!(rollouts.len(), 2);
+        assert_eq!(rollouts[0].len(), 2);
+        assert_eq!(rollouts[1].len(), 2);
 
         // Buffer should be reset
-        assert!(buffer.is_empty());
-        assert!(!buffer.is_rollout_ready());
+        assert!(!buffer.is_ready());
+        assert_eq!(buffer.total_transitions(), 0);
+        assert_eq!(buffer.consumed_epoch(), 1);
     }
 
     #[test]
-    fn test_experience_buffer_trait() {
-        let config = PPORolloutBufferConfig {
-            n_actors: 1,
-            n_envs_per_actor: 2,
-            rollout_length: 2,
-        };
-        let buffer = PPORolloutBuffer::new(config);
+    fn test_consumed_epoch_synchronization() {
+        let buffer = PPOBufferFF::new(1, 1);
 
-        // Test push_batch
-        buffer.push_batch(vec![make_transition(0), make_transition(1)]);
-        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.consumed_epoch(), 0);
 
-        // Test utilization
-        assert!((buffer.utilization() - 0.5).abs() < 0.01);
+        buffer.push_batch(vec![make_ff_transition(0, 0)], 0);
+        let _ = buffer.consume();
+        assert_eq!(buffer.consumed_epoch(), 1);
 
-        // Test clear
-        buffer.clear();
-        assert!(buffer.is_empty());
+        buffer.push_batch(vec![make_ff_transition(0, 1)], 0);
+        let _ = buffer.consume();
+        assert_eq!(buffer.consumed_epoch(), 2);
     }
 
     #[test]
-    fn test_on_policy_buffer_trait() {
-        let config = PPORolloutBufferConfig {
-            n_actors: 1,
-            n_envs_per_actor: 2,
-            rollout_length: 2,
-        };
-        let buffer = PPORolloutBuffer::new(config);
+    fn test_unified_ppo_rollouts() {
+        let rollouts = vec![
+            vec![make_ff_transition(0, 0), make_ff_transition(0, 1)],
+            vec![make_ff_transition(1, 0), make_ff_transition(1, 1)],
+            vec![], // Empty rollout (edge case)
+        ];
 
-        // Push transitions
-        buffer.push_batch(vec![
-            make_transition(0),
-            make_transition(1),
-            make_transition(2),
-            make_transition(3),
-        ]);
+        let batch = PPORollouts::new(rollouts, 2);
+        assert_eq!(batch.n_envs, 3);
+        assert_eq!(batch.total_transitions(), 4);
+        assert_eq!(batch.obs_dim(), Some(2));
 
-        assert!(buffer.is_ready(4));
+        let non_empty: Vec<_> = batch.non_empty_rollouts().collect();
+        assert_eq!(non_empty.len(), 2);
+    }
 
-        // Drain
-        let items = buffer.drain();
-        assert_eq!(items.len(), 4);
-        assert!(buffer.is_empty());
+    #[test]
+    fn test_recurrent_rollouts_with_hidden() {
+        let rollouts = vec![
+            vec![make_rec_transition(0, 0, 100), make_rec_transition(0, 1, 100)],
+            vec![make_rec_transition(1, 0, 101), make_rec_transition(1, 1, 101)],
+        ];
+
+        let batch: PPORollouts<PPOTransitionRecurrent> = PPORollouts::new(rollouts, 2);
+
+        // Verify hidden state is preserved
+        let first_rollout = &batch.rollouts[0];
+        assert_eq!(first_rollout[0].hidden_state(), &[0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(first_rollout[0].sequence_id, 100);
+        assert!(first_rollout[0].is_sequence_start);
+        assert!(!first_rollout[1].is_sequence_start);
     }
 }

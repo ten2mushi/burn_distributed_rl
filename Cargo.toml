@@ -3,6 +3,8 @@ resolver = "2"
 
 members = [
     "distributed_rl",
+    "environments/quadcopter",
+    "environments/rf",
     "examples",
     "operant_fork/operant/crates/operant",
     "operant_fork/operant/crates/operant-core",

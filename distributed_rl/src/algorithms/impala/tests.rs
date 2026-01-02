@@ -5,7 +5,7 @@
 //! - IMPALAConfig builder pattern and validation
 //! - IMPALABuffer thread-safety and FIFO semantics
 //! - IMPALABatch accessor methods and staleness computation
-//! - DistributedIMPALA algorithm trait implementation
+//! - IMPALA algorithm trait implementation
 //! - V-trace numerical stability and integration
 //! - Concurrency safety and integration tests
 //!
@@ -13,7 +13,7 @@
 //! these tests completely characterize the expected behavior.
 
 use super::*;
-use crate::algorithms::distributed_algorithm::DistributedAlgorithm;
+use crate::algorithms::core_algorithm::DistributedAlgorithm;
 use crate::algorithms::vtrace::{compute_vtrace, VTraceInput, compute_vtrace_batch};
 use crate::core::experience_buffer::{ExperienceBuffer, OffPolicyBuffer};
 use crate::core::transition::{IMPALATransition, Trajectory, Transition};
@@ -1005,7 +1005,7 @@ mod batch_tests {
 }
 
 // ============================================================================
-// DistributedIMPALA Algorithm Tests (~20 tests)
+// IMPALA Algorithm Tests (~20 tests)
 // ============================================================================
 
 mod algorithm_tests {
@@ -1016,35 +1016,35 @@ mod algorithm_tests {
     #[test]
     fn test_distributed_impala_new() {
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
-        assert_eq!(<DistributedIMPALA as DistributedAlgorithm<B>>::name(&impala), "DistributedIMPALA");
+        assert_eq!(<IMPALA as DistributedAlgorithm<B>>::name(&impala), "IMPALA");
     }
 
     #[test]
     fn test_is_off_policy() {
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
-        assert!(<DistributedIMPALA as DistributedAlgorithm<B>>::is_off_policy(&impala));
+        assert!(<IMPALA as DistributedAlgorithm<B>>::is_off_policy(&impala));
     }
 
     #[test]
     fn test_n_epochs_is_one() {
         // IMPALA uses single pass (off-policy, no need for multiple epochs)
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
-        assert_eq!(<DistributedIMPALA as DistributedAlgorithm<B>>::n_epochs(&impala), 1);
+        assert_eq!(<IMPALA as DistributedAlgorithm<B>>::n_epochs(&impala), 1);
     }
 
     #[test]
     fn test_n_minibatches_is_one() {
         // IMPALA processes full trajectory batch at once
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
-        assert_eq!(<DistributedIMPALA as DistributedAlgorithm<B>>::n_minibatches(&impala), 1);
+        assert_eq!(<IMPALA as DistributedAlgorithm<B>>::n_minibatches(&impala), 1);
     }
 
     #[test]
@@ -1052,19 +1052,19 @@ mod algorithm_tests {
         let config = IMPALAConfig::new()
             .with_batch_size(64)
             .with_gamma(0.995);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         // Use config() method since field is private
-        assert_eq!(<DistributedIMPALA as DistributedAlgorithm<B>>::config(&impala).batch_size, 64);
-        assert_eq!(<DistributedIMPALA as DistributedAlgorithm<B>>::config(&impala).gamma, 0.995);
+        assert_eq!(<IMPALA as DistributedAlgorithm<B>>::config(&impala).batch_size, 64);
+        assert_eq!(<IMPALA as DistributedAlgorithm<B>>::config(&impala).gamma, 0.995);
     }
 
     #[test]
     fn test_create_buffer() {
         let config = IMPALAConfig::default();
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 4, 32);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 4, 32);
         assert_eq!(buffer.config().n_actors, 4);
         assert_eq!(buffer.config().n_envs_per_actor, 32);
     }
@@ -1072,9 +1072,9 @@ mod algorithm_tests {
     #[test]
     fn test_create_buffer_trajectory_length() {
         let config = IMPALAConfig::new().with_trajectory_length(40);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 2, 16);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 2, 16);
         assert_eq!(buffer.config().trajectory_length, 40);
     }
 
@@ -1082,29 +1082,29 @@ mod algorithm_tests {
     fn test_is_ready_delegates_to_buffer() {
         let config = IMPALAConfig::new()
             .with_batch_size(2);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
 
-        assert!(!<DistributedIMPALA as DistributedAlgorithm<B>>::is_ready(&impala, &buffer));
+        assert!(!<IMPALA as DistributedAlgorithm<B>>::is_ready(&impala, &buffer));
 
         buffer.push_trajectory(make_trajectory(5, 0, 1));
         buffer.push_trajectory(make_trajectory(5, 1, 1));
 
-        assert!(<DistributedIMPALA as DistributedAlgorithm<B>>::is_ready(&impala, &buffer));
+        assert!(<IMPALA as DistributedAlgorithm<B>>::is_ready(&impala, &buffer));
     }
 
     #[test]
     fn test_sample_batch_delegates() {
         let config = IMPALAConfig::new()
             .with_batch_size(2);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
         buffer.push_trajectory(make_trajectory(5, 0, 1));
         buffer.push_trajectory(make_trajectory(5, 1, 1));
 
-        let batch = <DistributedIMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
+        let batch = <IMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
         assert!(batch.is_some());
         assert_eq!(batch.unwrap().len(), 2);
     }
@@ -1118,14 +1118,14 @@ mod algorithm_tests {
         // Unlike PPO, IMPALA should NOT discard stale batches
         // V-trace automatically corrects for staleness
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory(5, 0, 1),  // Very stale (version 1)
         ]);
 
         let current_version = 100;  // 99 versions behind
-        let result = <DistributedIMPALA as DistributedAlgorithm<B>>::handle_staleness(
+        let result = <IMPALA as DistributedAlgorithm<B>>::handle_staleness(
             &impala, batch, current_version
         );
 
@@ -1136,7 +1136,7 @@ mod algorithm_tests {
     #[test]
     fn test_staleness_preserves_all_trajectories() {
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory(5, 0, 1),
@@ -1144,7 +1144,7 @@ mod algorithm_tests {
             make_trajectory(5, 2, 99),
         ]);
 
-        let result = <DistributedIMPALA as DistributedAlgorithm<B>>::handle_staleness(
+        let result = <IMPALA as DistributedAlgorithm<B>>::handle_staleness(
             &impala, batch, 100
         );
 
@@ -1157,14 +1157,14 @@ mod algorithm_tests {
     #[test]
     fn test_staleness_preserves_policy_versions() {
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory(5, 0, 5),
             make_trajectory(5, 1, 10),
         ]);
 
-        let result = <DistributedIMPALA as DistributedAlgorithm<B>>::handle_staleness(
+        let result = <IMPALA as DistributedAlgorithm<B>>::handle_staleness(
             &impala, batch, 100
         );
 
@@ -1177,14 +1177,14 @@ mod algorithm_tests {
         // This test verifies the behavior but cannot easily check logs
         // The important thing is it doesn't panic or discard data
         let config = IMPALAConfig::default();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory(5, 0, 1),  // version 1
         ]);
 
         // Staleness > 10 should trigger warning
-        let result = <DistributedIMPALA as DistributedAlgorithm<B>>::handle_staleness(
+        let result = <IMPALA as DistributedAlgorithm<B>>::handle_staleness(
             &impala, batch, 20  // staleness = 19 > 10
         );
 
@@ -1202,7 +1202,7 @@ mod algorithm_tests {
             .with_gamma(0.99)
             .with_rho_clip(1.0)
             .with_c_clip(1.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_log_probs(3, 0, 1, &[-1.0, -1.0, -1.0]),
@@ -1237,7 +1237,7 @@ mod algorithm_tests {
             .with_gamma(0.99)
             .with_rho_clip(1.0)
             .with_c_clip(1.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         // Behavior: low probability actions
         let batch = make_impala_batch(vec![
@@ -1269,7 +1269,7 @@ mod algorithm_tests {
             .with_gamma(0.99)
             .with_rho_clip(1.0)
             .with_c_clip(1.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_log_probs(2, 0, 1, &[-1.0, -1.0]),
@@ -1298,7 +1298,7 @@ mod algorithm_tests {
             .with_gamma(0.99)
             .with_rho_clip(1.0)
             .with_c_clip(1.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_non_terminal_trajectory(2, 0, 1),
@@ -2005,13 +2005,13 @@ mod concurrency_tests {
     #[test]
     fn test_algorithm_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<DistributedIMPALA>();
+        assert_send::<IMPALA>();
     }
 
     #[test]
     fn test_algorithm_is_sync() {
         fn assert_sync<T: Sync>() {}
-        assert_sync::<DistributedIMPALA>();
+        assert_sync::<IMPALA>();
     }
 
     #[test]
@@ -2097,21 +2097,21 @@ mod integration_tests {
             .with_gamma(0.99)
             .with_rho_clip(1.0)
             .with_c_clip(1.0);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
 
         // Push trajectories
         buffer.push_trajectory(make_trajectory_with_log_probs(3, 0, 1, &[-1.0, -1.0, -1.0]));
         buffer.push_trajectory(make_trajectory_with_log_probs(3, 1, 2, &[-0.5, -0.5, -0.5]));
 
         // Sample batch
-        let batch = <DistributedIMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
+        let batch = <IMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
         assert!(batch.is_some());
         let batch = batch.unwrap();
 
         // Handle staleness
-        let batch = <DistributedIMPALA as DistributedAlgorithm<B>>::handle_staleness(&impala, batch, 10);
+        let batch = <IMPALA as DistributedAlgorithm<B>>::handle_staleness(&impala, batch, 10);
         assert_eq!(batch.len(), 2);
 
         // Compute V-trace
@@ -2138,7 +2138,7 @@ mod integration_tests {
             .with_gamma(0.99)
             .with_rho_clip(1.0)
             .with_c_clip(1.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         // Same log probs for behavior and target
         let log_probs = vec![-1.0, -1.0, -1.0];
@@ -2166,9 +2166,9 @@ mod integration_tests {
             .with_n_envs_per_actor(8)
             .with_trajectory_length(10)
             .with_batch_size(4);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 4, 8);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 4, 8);
 
         // Verify buffer config matches algorithm config
         assert_eq!(buffer.config().n_actors, 4);
@@ -2180,22 +2180,22 @@ mod integration_tests {
     #[test]
     fn test_multiple_sample_cycles() {
         let config = IMPALAConfig::new().with_batch_size(2);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
 
         // First cycle
         buffer.push_trajectory(make_trajectory(5, 0, 1));
         buffer.push_trajectory(make_trajectory(5, 1, 1));
 
-        let batch1 = <DistributedIMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
+        let batch1 = <IMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
         assert!(batch1.is_some());
 
         // Second cycle
         buffer.push_trajectory(make_trajectory(5, 2, 2));
         buffer.push_trajectory(make_trajectory(5, 3, 2));
 
-        let batch2 = <DistributedIMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
+        let batch2 = <IMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer);
         assert!(batch2.is_some());
 
         // Batches should have different env_ids (FIFO)
@@ -2206,16 +2206,16 @@ mod integration_tests {
     #[test]
     fn test_mixed_policy_versions_in_batch() {
         let config = IMPALAConfig::new().with_batch_size(3);
-        let impala: DistributedIMPALA = DistributedAlgorithm::<B>::new(config);
+        let impala: IMPALA = DistributedAlgorithm::<B>::new(config);
 
-        let buffer = <DistributedIMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
+        let buffer = <IMPALA as DistributedAlgorithm<B>>::create_buffer(&impala, 1, 1);
 
         // Push trajectories from different policy versions
         buffer.push_trajectory(make_trajectory(5, 0, 1));
         buffer.push_trajectory(make_trajectory(5, 1, 5));
         buffer.push_trajectory(make_trajectory(5, 2, 10));
 
-        let batch = <DistributedIMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer).unwrap();
+        let batch = <IMPALA as DistributedAlgorithm<B>>::sample_batch(&impala, &buffer).unwrap();
 
         assert_eq!(batch.policy_versions[0], 1);
         assert_eq!(batch.policy_versions[1], 5);
@@ -2227,7 +2227,7 @@ mod integration_tests {
         let config = IMPALAConfig::new()
             .with_batch_size(3)
             .with_trajectory_length(20);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory(5, 0, 1),   // Short
@@ -2271,7 +2271,7 @@ mod integration_tests {
         let config = IMPALAConfig::new()
             .with_gamma(0.99)
             .with_rho_clip(1.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         // Terminal trajectory
         let terminal_batch = make_impala_batch(vec![make_trajectory(3, 0, 1)]);
@@ -2301,7 +2301,7 @@ mod integration_tests {
         let config = IMPALAConfig::new()
             .with_rho_clip(10.0)  // High clip
             .with_c_clip(10.0);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         // Large policy divergence
         let batch = make_impala_batch(vec![
@@ -2332,7 +2332,7 @@ mod integration_tests {
     fn test_low_gamma() {
         let config = IMPALAConfig::new()
             .with_gamma(0.0); // No discounting of future
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_log_probs(3, 0, 1, &[-1.0, -1.0, -1.0]),
@@ -2359,17 +2359,17 @@ mod integration_tests {
         let config = IMPALAConfig::new()
             .with_batch_size(64)
             .with_gamma(0.995);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
         let cloned = impala.clone();
 
         // Use config() method since field is private
         assert_eq!(
-            <DistributedIMPALA as DistributedAlgorithm<B>>::config(&impala).batch_size,
-            <DistributedIMPALA as DistributedAlgorithm<B>>::config(&cloned).batch_size
+            <IMPALA as DistributedAlgorithm<B>>::config(&impala).batch_size,
+            <IMPALA as DistributedAlgorithm<B>>::config(&cloned).batch_size
         );
         assert_eq!(
-            <DistributedIMPALA as DistributedAlgorithm<B>>::config(&impala).gamma,
-            <DistributedIMPALA as DistributedAlgorithm<B>>::config(&cloned).gamma
+            <IMPALA as DistributedAlgorithm<B>>::config(&impala).gamma,
+            <IMPALA as DistributedAlgorithm<B>>::config(&cloned).gamma
         );
     }
 
@@ -2423,7 +2423,7 @@ mod loss_tests {
         let config = IMPALAConfig::new()
             .with_vf_coef(0.5)
             .with_entropy_coef(0.01);
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         // Create a minimal batch
         let batch = make_impala_batch(vec![
@@ -2435,7 +2435,7 @@ mod loss_tests {
         let entropy: Tensor<B, 1> = Tensor::from_floats([0.5, 0.5, 0.5], &device);
         let values: Tensor<B, 2> = Tensor::from_floats([[0.5], [0.5], [0.5]], &device);
 
-        let output: LossOutput<B> = <DistributedIMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
+        let output: LossOutput<B> = <IMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
             &impala,
             &batch,
             log_probs,
@@ -2455,7 +2455,7 @@ mod loss_tests {
     fn test_loss_is_finite_with_normal_inputs() {
         let device = get_test_device();
         let config = IMPALAConfig::new();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_log_probs(5, 0, 1, &[-1.0; 5]),
@@ -2465,7 +2465,7 @@ mod loss_tests {
         let entropy: Tensor<B, 1> = Tensor::from_floats([0.5, 0.5, 0.5, 0.5, 0.5], &device);
         let values: Tensor<B, 2> = Tensor::from_floats([[0.5], [0.5], [0.5], [0.5], [0.5]], &device);
 
-        let output: LossOutput<B> = <DistributedIMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
+        let output: LossOutput<B> = <IMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
             &impala,
             &batch,
             log_probs,
@@ -2485,11 +2485,11 @@ mod loss_tests {
 
         // Low entropy coefficient
         let config_low = IMPALAConfig::new().with_entropy_coef(0.0);
-        let impala_low = DistributedIMPALA::new(config_low);
+        let impala_low = IMPALA::new(config_low);
 
         // High entropy coefficient
         let config_high = IMPALAConfig::new().with_entropy_coef(1.0);
-        let impala_high = DistributedIMPALA::new(config_high);
+        let impala_high = IMPALA::new(config_high);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_log_probs(2, 0, 1, &[-1.0, -1.0]),
@@ -2499,7 +2499,7 @@ mod loss_tests {
         let entropy: Tensor<B, 1> = Tensor::from_floats([1.0, 1.0], &device); // High entropy
         let values: Tensor<B, 2> = Tensor::from_floats([[0.5], [0.5]], &device);
 
-        let output_low: LossOutput<B> = <DistributedIMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
+        let output_low: LossOutput<B> = <IMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
             &impala_low,
             &batch,
             log_probs.clone(),
@@ -2508,7 +2508,7 @@ mod loss_tests {
             &device,
         );
 
-        let output_high: LossOutput<B> = <DistributedIMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
+        let output_high: LossOutput<B> = <IMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
             &impala_high,
             &batch,
             log_probs,
@@ -2531,11 +2531,11 @@ mod loss_tests {
 
         // Low VF coefficient
         let config_low = IMPALAConfig::new().with_vf_coef(0.0);
-        let impala_low = DistributedIMPALA::new(config_low);
+        let impala_low = IMPALA::new(config_low);
 
         // High VF coefficient
         let config_high = IMPALAConfig::new().with_vf_coef(1.0);
-        let impala_high = DistributedIMPALA::new(config_high);
+        let impala_high = IMPALA::new(config_high);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_log_probs(2, 0, 1, &[-1.0, -1.0]),
@@ -2546,7 +2546,7 @@ mod loss_tests {
         let entropy: Tensor<B, 1> = Tensor::from_floats([0.5, 0.5], &device);
         let values: Tensor<B, 2> = Tensor::from_floats([[0.0], [0.0]], &device); // Far from targets
 
-        let output_low: LossOutput<B> = <DistributedIMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
+        let output_low: LossOutput<B> = <IMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
             &impala_low,
             &batch,
             log_probs.clone(),
@@ -2555,7 +2555,7 @@ mod loss_tests {
             &device,
         );
 
-        let output_high: LossOutput<B> = <DistributedIMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
+        let output_high: LossOutput<B> = <IMPALA as DistributedAlgorithm<B>>::compute_batch_loss(
             &impala_high,
             &batch,
             log_probs,
@@ -2615,7 +2615,7 @@ mod edge_case_tests {
     #[test]
     fn test_zero_reward_trajectory() {
         let config = IMPALAConfig::new();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_rewards(3, 0, 1, &[0.0, 0.0, 0.0]),
@@ -2637,7 +2637,7 @@ mod edge_case_tests {
     #[test]
     fn test_negative_rewards() {
         let config = IMPALAConfig::new();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_rewards(3, 0, 1, &[-1.0, -2.0, -3.0]),
@@ -2659,7 +2659,7 @@ mod edge_case_tests {
     #[test]
     fn test_large_rewards() {
         let config = IMPALAConfig::new();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let batch = make_impala_batch(vec![
             make_trajectory_with_rewards(3, 0, 1, &[1000.0, 2000.0, 3000.0]),
@@ -2687,7 +2687,7 @@ mod edge_case_tests {
         ]);
 
         let config = IMPALAConfig::new();
-        let impala = DistributedIMPALA::new(config);
+        let impala = IMPALA::new(config);
 
         let results = impala.compute_vtrace_batch(
             &batch,

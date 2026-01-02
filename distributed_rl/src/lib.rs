@@ -41,7 +41,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use distributed_rl::{IMPALAConfig, DistributedIMPALADiscrete};
+//! use distributed_rl::{IMPALAConfig, IMPALADiscrete};
 //!
 //! let config = IMPALAConfig::new()
 //!     .with_n_actors(4)
@@ -49,7 +49,7 @@
 //!     .with_trajectory_length(20)
 //!     .with_gamma(0.99);
 //!
-//! let runner: DistributedIMPALADiscrete<B> = DistributedIMPALARunner::new(config);
+//! let runner: IMPALADiscrete<B> = IMPALARunner::new(config);
 //! let optimizer = runner.create_optimizer::<MyModel>();
 //! runner.run(model_factory, initial_model, env_factory, optimizer, callback);
 //! ```
@@ -65,6 +65,7 @@ pub mod metrics;
 pub mod environment;
 pub mod scheduling;
 pub mod checkpoint;
+pub mod nn;
 
 // Re-export commonly used types
 pub use core::transition::{Action, Transition, PPOTransition, IMPALATransition, Trajectory};
@@ -91,30 +92,62 @@ pub use actors::actor_pool::{ActorPool, ActorPoolConfig};
 
 pub use learner::learner::{Learner, LearnerConfig, LearnerHandle};
 
-// Generic distributed runner (for custom implementations)
-pub use runners::distributed_runner::{DistributedRunner, DistributedRunnerConfig, DistributedRunnerBuilder, TrainingStats};
+// Generic runner (for custom implementations)
+pub use runners::runner::{Runner, RunnerConfig, RunnerBuilder, TrainingStats};
 
-// New generic Learner exports
+// Generic Learner exports
 pub use runners::learner::{
     Learner as GenericLearner, LearnerConfig as GenericLearnerConfig, LearnerStats,
     VectorizedEnv as GenericVectorizedEnv, StepResult as LearnerStepResult,
-    PPODiscrete, PPOContinuous, RecurrentPPODiscrete, RecurrentPPOContinuous,
 };
 
-// Distributed algorithms
+// Core algorithms
 pub use algorithms::{
-    DistributedAlgorithm, DistributedPPOConfig, IMPALAConfig, IMPALAStats,
-    OnPolicyDistributed, OffPolicyDistributed,
-    DistributedPPO, PPORolloutBuffer, PPORolloutBufferConfig, PPORolloutBatch, PPOProcessedBatch,
-    DistributedIMPALA, IMPALABuffer, IMPALABufferConfig, IMPALABatch, IMPALAProcessedBatch,
+    DistributedAlgorithm, PPOAlgorithmConfig, IMPALAConfig, IMPALAStats,
+    OnPolicy, OffPolicy,
+    PPO, PPORolloutBuffer, PPORolloutBufferConfig, PPORolloutBatch, PPOProcessedBatch,
+    IMPALA, IMPALABuffer, IMPALABufferConfig, IMPALABatch, IMPALAProcessedBatch,
 };
 
-// Distributed runners
+// Runners
 pub use runners::{
-    DistributedIMPALARunner, DistributedIMPALADiscrete, DistributedIMPALAContinuous,
-    DistributedRecurrentIMPALADiscrete, DistributedRecurrentIMPALAContinuous,
-    DistributedPPORunner, DistributedPPODiscrete, DistributedPPOContinuous,
-    DistributedRecurrentPPORunner, DistributedRecurrentPPODiscrete, DistributedRecurrentPPOContinuous,
+    // IMPALA runners
+    IMPALARunner, IMPALADiscrete, IMPALAContinuous,
+    RecurrentIMPALADiscrete, RecurrentIMPALAContinuous,
+    // PPO runners
+    PPORunner, PPODiscrete, PPOContinuous,
+    RecurrentPPODiscrete, RecurrentPPOContinuous,
+    // PPO strategies
+    PPOTrainingStrategy, FeedForwardStrategy, RecurrentStrategy,
+    // Configuration
+    PPOConfig, PPOStats, EntropySchedule, ObsNormalizationConfig, PopArtConfig,
+};
+
+// Core utilities
+pub use core::{RunningMeanStd, SharedRunningMeanStd, RunningScalarStats};
+pub use core::{
+    SoftUpdatable, soft_update, hard_copy,
+    TargetNetworkConfig, TargetNetworkManager, ExponentialMovingAverage,
+};
+
+// Normalization utilities
+pub use algorithms::ppo::normalization::{
+    ObservationNormalizer, SharedObservationNormalizer,
+    RewardNormalizer, SharedRewardNormalizer,
+    PopArt,
+};
+
+// Prioritized sampling
+pub use algorithms::ppo::prioritization::{
+    PrioritizationConfig, PrioritizedSampler, PrioritizedSample,
+    SumTree, PriorityBuffer,
+};
+
+// Neural network utilities
+pub use nn::{
+    OrthogonalLinear, OrthogonalLinearConfig, generate_orthogonal_weights,
+    SpectralNormLinear, SpectralNormLinearConfig,
+    MultiHeadAttention, MultiHeadAttentionConfig,
 };
 
 pub use metrics::training_metrics::{TrainingMetrics, SharedTrainingMetrics, training_metrics};

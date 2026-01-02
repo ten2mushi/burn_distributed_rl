@@ -1,4 +1,4 @@
-//! Configuration tests for DistributedPPOConfig.
+//! Configuration tests for PPOConfig.
 //!
 //! These tests define the correct behavior of the configuration builder pattern
 //! and validate that invalid configurations are rejected.
@@ -11,7 +11,7 @@
 //! - Support fluent builder pattern for customization
 //! - Compute derived values correctly
 
-use crate::runners::distributed_ppo_config::DistributedPPOConfig;
+use crate::runners::ppo_config::PPOConfig;
 
 // ============================================================================
 // Default Configuration Tests
@@ -21,7 +21,7 @@ use crate::runners::distributed_ppo_config::DistributedPPOConfig;
 /// INTENT: Users should be able to start with defaults for simple cases.
 #[test]
 fn test_default_config_has_sensible_values() {
-    let config = DistributedPPOConfig::default();
+    let config = PPOConfig::default();
 
     // Multi-actor defaults should be reasonable for typical hardware
     assert!(config.n_actors >= 1, "Must have at least one actor");
@@ -59,7 +59,7 @@ fn test_default_config_has_sensible_values() {
 /// INTENT: Derived computations should be mathematically correct.
 #[test]
 fn test_default_config_derived_values() {
-    let config = DistributedPPOConfig::default();
+    let config = PPOConfig::default();
 
     let expected_total_envs = config.n_actors * config.n_envs_per_actor;
     assert_eq!(
@@ -91,7 +91,7 @@ fn test_default_config_derived_values() {
 /// INTENT: Each builder method should only affect its target field.
 #[test]
 fn test_builder_pattern_preserves_values() {
-    let config = DistributedPPOConfig::new()
+    let config = PPOConfig::new()
         .with_n_actors(8)
         .with_n_envs_per_actor(16)
         .with_rollout_length(128)
@@ -125,12 +125,12 @@ fn test_builder_pattern_preserves_values() {
 /// INTENT: Builder pattern should be order-independent.
 #[test]
 fn test_builder_order_independence() {
-    let config1 = DistributedPPOConfig::new()
+    let config1 = PPOConfig::new()
         .with_n_actors(4)
         .with_gamma(0.99)
         .with_learning_rate(3e-4);
 
-    let config2 = DistributedPPOConfig::new()
+    let config2 = PPOConfig::new()
         .with_learning_rate(3e-4)
         .with_n_actors(4)
         .with_gamma(0.99);
@@ -144,7 +144,7 @@ fn test_builder_order_independence() {
 /// INTENT: Support modifying existing configs.
 #[test]
 fn test_builder_from_clone() {
-    let base = DistributedPPOConfig::new().with_n_actors(4).with_gamma(0.99);
+    let base = PPOConfig::new().with_n_actors(4).with_gamma(0.99);
 
     let modified = base.clone().with_n_actors(8);
 
@@ -173,7 +173,7 @@ fn test_total_envs_computation() {
     ];
 
     for (n_actors, n_envs, expected) in test_cases {
-        let config = DistributedPPOConfig::new()
+        let config = PPOConfig::new()
             .with_n_actors(n_actors)
             .with_n_envs_per_actor(n_envs);
 
@@ -192,7 +192,7 @@ fn test_total_envs_computation() {
 /// INTENT: transitions = total_envs * rollout_length, always.
 #[test]
 fn test_transitions_per_rollout_computation() {
-    let config = DistributedPPOConfig::new()
+    let config = PPOConfig::new()
         .with_n_actors(4)
         .with_n_envs_per_actor(32)
         .with_rollout_length(64);
@@ -205,7 +205,7 @@ fn test_transitions_per_rollout_computation() {
 /// INTENT: minibatch = transitions / n_minibatches, integer division.
 #[test]
 fn test_minibatch_size_computation() {
-    let config = DistributedPPOConfig::new()
+    let config = PPOConfig::new()
         .with_n_actors(4)
         .with_n_envs_per_actor(32)
         .with_rollout_length(64)
@@ -219,7 +219,7 @@ fn test_minibatch_size_computation() {
 /// INTENT: Integer division should truncate correctly.
 #[test]
 fn test_minibatch_size_uneven_division() {
-    let config = DistributedPPOConfig::new()
+    let config = PPOConfig::new()
         .with_n_actors(1)
         .with_n_envs_per_actor(10)
         .with_rollout_length(10)
@@ -237,7 +237,7 @@ fn test_minibatch_size_uneven_division() {
 /// INTENT: Edge cases with minimum valid values should work.
 #[test]
 fn test_minimal_configuration() {
-    let config = DistributedPPOConfig::new()
+    let config = PPOConfig::new()
         .with_n_actors(1)
         .with_n_envs_per_actor(1)
         .with_rollout_length(1)
@@ -254,11 +254,11 @@ fn test_minimal_configuration() {
 #[test]
 fn test_extreme_gamma_values() {
     // gamma = 0 (myopic)
-    let myopic = DistributedPPOConfig::new().with_gamma(0.0);
+    let myopic = PPOConfig::new().with_gamma(0.0);
     assert!((myopic.gamma - 0.0).abs() < 1e-6);
 
     // gamma = 1 (undiscounted)
-    let undiscounted = DistributedPPOConfig::new().with_gamma(1.0);
+    let undiscounted = PPOConfig::new().with_gamma(1.0);
     assert!((undiscounted.gamma - 1.0).abs() < 1e-6);
 }
 
@@ -267,11 +267,11 @@ fn test_extreme_gamma_values() {
 #[test]
 fn test_extreme_lambda_values() {
     // lambda = 0 (one-step TD)
-    let td = DistributedPPOConfig::new().with_gae_lambda(0.0);
+    let td = PPOConfig::new().with_gae_lambda(0.0);
     assert!((td.gae_lambda - 0.0).abs() < 1e-6);
 
     // lambda = 1 (Monte Carlo-like)
-    let mc = DistributedPPOConfig::new().with_gae_lambda(1.0);
+    let mc = PPOConfig::new().with_gae_lambda(1.0);
     assert!((mc.gae_lambda - 1.0).abs() < 1e-6);
 }
 
@@ -279,13 +279,13 @@ fn test_extreme_lambda_values() {
 /// INTENT: Optional fields should be None by default and Some when set.
 #[test]
 fn test_optional_fields() {
-    let default_config = DistributedPPOConfig::new();
+    let default_config = PPOConfig::new();
     assert!(
         default_config.target_reward.is_none(),
         "target_reward should be None by default"
     );
 
-    let with_target = DistributedPPOConfig::new().with_target_reward(500.0);
+    let with_target = PPOConfig::new().with_target_reward(500.0);
     assert_eq!(with_target.target_reward, Some(500.0));
 }
 
@@ -301,7 +301,7 @@ fn test_optional_fields() {
 /// NOTE: If this test passes without panic, the implementation lacks validation.
 #[test]
 fn test_zero_actors_should_be_rejected() {
-    let config = DistributedPPOConfig::new().with_n_actors(0);
+    let config = PPOConfig::new().with_n_actors(0);
 
     // EXPECTED BEHAVIOR: This should either:
     // 1. Panic during construction
@@ -321,7 +321,7 @@ fn test_zero_actors_should_be_rejected() {
 /// INTENT: rollout_length = 0 makes no sense and should fail.
 #[test]
 fn test_zero_rollout_length_should_be_rejected() {
-    let config = DistributedPPOConfig::new().with_rollout_length(0);
+    let config = PPOConfig::new().with_rollout_length(0);
 
     // Documents current behavior - accepts 0 which is a potential bug
     assert_eq!(config.rollout_length, 0);
@@ -332,7 +332,7 @@ fn test_zero_rollout_length_should_be_rejected() {
 /// INTENT: n_minibatches = 0 would cause division by zero.
 #[test]
 fn test_zero_minibatches_should_be_rejected() {
-    let config = DistributedPPOConfig::new().with_n_minibatches(0);
+    let config = PPOConfig::new().with_n_minibatches(0);
 
     // Documents current behavior - accepts 0 which would cause panic on minibatch_size()
     assert_eq!(config.n_minibatches, 0);
@@ -342,12 +342,12 @@ fn test_zero_minibatches_should_be_rejected() {
 // Stats Structure Tests
 // ============================================================================
 
-/// Test that DistributedPPOStats default is valid.
+/// Test that PPOStats default is valid.
 #[test]
 fn test_stats_default_is_valid() {
-    use crate::runners::distributed_ppo_config::DistributedPPOStats;
+    use crate::runners::ppo_config::PPOStats;
 
-    let stats = DistributedPPOStats::default();
+    let stats = PPOStats::default();
 
     assert_eq!(stats.env_steps, 0);
     assert_eq!(stats.episodes, 0);

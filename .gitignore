@@ -2,3 +2,14 @@
 .gitignore
 target/
 Cargo.lock
+distributed_rl/notes/
+docs/
+environments/wifi_sensing/
+environments/quadcopter/FORMAL_VERIFICATION_REPORT.md
+environments/quadcopter/TYPE_LEVEL_PROOFS.md
+environments/quadcopter/notes.md
+environments/rf/docs/
+environments/rf/notes/
+environments/rf/examples/passive_simulation_2.rs
+environments/rf/examples/passive_simulation_3.rs
+environments/rf/examples/passive_simulation_5.rs

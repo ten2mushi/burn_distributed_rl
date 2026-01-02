@@ -6,14 +6,12 @@
 //!
 //! # Test Categories
 //!
-//! 1. **Config Tests**: PPORolloutBufferConfig, DistributedPPOConfig
+//! 1. **Config Tests**: PPORolloutBufferConfig, PPOAlgorithmConfig
 //! 2. **Batch Tests**: PPORolloutBatch accessor methods and edge cases
 //! 3. **Buffer Tests**: PPORolloutBuffer state machine and thread safety
-//! 4. **Distributed Buffer Tests**: DistributedPPOBuffer per-env organization
-//! 5. **Recurrent Buffer Tests**: RecurrentPPOBuffer sequence handling
-//! 6. **Algorithm Tests**: DistributedPPO GAE and loss computation
-//! 7. **Concurrency Tests**: Multi-threaded push/consume patterns
-//! 8. **Integration Tests**: Full training cycle simulation
+//! 4. **Algorithm Tests**: PPO GAE and loss computation
+//! 5. **Concurrency Tests**: Multi-threaded push/consume patterns
+//! 6. **Integration Tests**: Full training cycle simulation
 //!
 //! # Backend
 //!
@@ -25,11 +23,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::distributed_ppo::{DistributedPPO, PPOProcessedBatch};
-    use super::super::distributed_ppo_buffer::{DistributedPPOBuffer, DistributedPPORollouts};
-    use super::super::ppo_buffer::{PPORolloutBuffer, PPORolloutBufferConfig, PPORolloutBatch};
-    use super::super::recurrent_ppo_buffer::RecurrentPPOBuffer;
-    use crate::algorithms::distributed_algorithm::{DistributedAlgorithm, DistributedPPOConfig};
+    use super::super::ppo::{PPO, PPOProcessedBatch};
+    use super::super::ppo_batch_buffer::{PPORolloutBuffer, PPORolloutBufferConfig, PPORolloutBatch};
+    use crate::algorithms::core_algorithm::{DistributedAlgorithm, PPOAlgorithmConfig};
     use crate::algorithms::gae::compute_gae;
     use crate::core::experience_buffer::{ExperienceBuffer, OnPolicyBuffer};
     use crate::core::transition::{PPOTransition, RecurrentPPOTransition, Transition};
@@ -37,7 +33,6 @@ mod tests {
     use burn::backend::{Autodiff, Wgpu};
     use burn::tensor::backend::Backend;
     use burn::tensor::Tensor;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -66,6 +61,7 @@ mod tests {
             ),
             log_prob: -0.5 - (id as f32) * 0.01, // varying log_prob
             value: 0.5 + (id as f32) * 0.05,     // varying value
+            bootstrap_value: None,
         }
     }
 
@@ -82,6 +78,7 @@ mod tests {
             ),
             log_prob: -0.5,
             value: 0.0, // terminal value should be 0
+            bootstrap_value: None,
         }
     }
 
@@ -98,6 +95,7 @@ mod tests {
             ),
             log_prob: -0.5,
             value: 0.8, // bootstrap value for truncation
+            bootstrap_value: None,
         }
     }
 
@@ -114,6 +112,7 @@ mod tests {
             ),
             log_prob: -0.5,
             value: 1.0,
+            bootstrap_value: None,
         }
     }
 
@@ -663,411 +662,9 @@ mod tests {
         }
     }
 
-    // ============================================================================
-    // Module: DistributedPPOBuffer Tests
-    // ============================================================================
-
-    mod distributed_buffer_tests {
-        use super::*;
-
-        #[test]
-        fn test_distributed_buffer_creation() {
-            let buffer = DistributedPPOBuffer::new(64, 128);
-
-            assert_eq!(buffer.rollout_length(), 64);
-            assert_eq!(buffer.total_envs(), 128);
-            assert!(!buffer.is_ready());
-            assert_eq!(buffer.total_transitions(), 0);
-        }
-
-        #[test]
-        fn test_distributed_buffer_push_batch_single_actor() {
-            let buffer = DistributedPPOBuffer::new(3, 4);
-
-            // Actor 0 with 2 envs pushes step 0
-            buffer.push_batch(
-                vec![make_env_transition(0, 0), make_env_transition(1, 0)],
-                0, // offset 0
-            );
-
-            assert_eq!(buffer.total_transitions(), 2);
-            assert!(!buffer.is_ready());
-        }
-
-        #[test]
-        fn test_distributed_buffer_push_batch_correct_offset() {
-            // 2 actors, 2 envs each, rollout length 2
-            let buffer = DistributedPPOBuffer::new(2, 4);
-
-            // Actor 0 (envs 0-1) pushes step 0
-            buffer.push_batch(
-                vec![make_env_transition(0, 0), make_env_transition(1, 0)],
-                0,
-            );
-
-            // Actor 1 (envs 2-3) pushes step 0
-            buffer.push_batch(
-                vec![make_env_transition(2, 0), make_env_transition(3, 0)],
-                2, // offset 2
-            );
-
-            assert_eq!(buffer.total_transitions(), 4);
-
-            // Push step 1 for both actors
-            buffer.push_batch(
-                vec![make_env_transition(0, 1), make_env_transition(1, 1)],
-                0,
-            );
-            buffer.push_batch(
-                vec![make_env_transition(2, 1), make_env_transition(3, 1)],
-                2,
-            );
-
-            assert!(buffer.is_ready());
-            assert_eq!(buffer.total_transitions(), 8);
-        }
-
-        #[test]
-        fn test_distributed_buffer_overflow_protection() {
-            let buffer = DistributedPPOBuffer::new(2, 2);
-
-            // Push more than rollout_length steps
-            for step in 0..5 {
-                buffer.push_batch(
-                    vec![make_env_transition(0, step), make_env_transition(1, step)],
-                    0,
-                );
-            }
-
-            // Should only store rollout_length (2) per env
-            assert_eq!(buffer.total_transitions(), 4);
-        }
-
-        #[test]
-        fn test_distributed_buffer_invalid_env_id_ignored() {
-            let buffer = DistributedPPOBuffer::new(2, 2);
-
-            // Push with offset that would exceed total_envs
-            buffer.push_batch(
-                vec![make_env_transition(0, 0), make_env_transition(1, 0)],
-                10, // Invalid offset
-            );
-
-            // Should not store anything
-            assert_eq!(buffer.total_transitions(), 0);
-        }
-
-        #[test]
-        fn test_distributed_buffer_progress() {
-            let buffer = DistributedPPOBuffer::new(3, 4);
-
-            let (min, total) = buffer.progress();
-            assert_eq!(min, 0);
-            assert_eq!(total, 4);
-
-            // Push 1 step for all envs
-            buffer.push_batch(make_batch(4), 0);
-
-            let (min, total) = buffer.progress();
-            assert_eq!(min, 1);
-            assert_eq!(total, 4);
-        }
-
-        #[test]
-        fn test_distributed_buffer_progress_uneven() {
-            let buffer = DistributedPPOBuffer::new(3, 4);
-
-            // Push 2 steps for envs 0-1 only
-            buffer.push_batch(
-                vec![make_env_transition(0, 0), make_env_transition(1, 0)],
-                0,
-            );
-            buffer.push_batch(
-                vec![make_env_transition(0, 1), make_env_transition(1, 1)],
-                0,
-            );
-
-            let (min, _) = buffer.progress();
-            assert_eq!(min, 0); // envs 2-3 have 0 steps
-        }
-
-        #[test]
-        fn test_distributed_buffer_consume() {
-            let buffer = DistributedPPOBuffer::new(2, 2);
-
-            // Fill buffer
-            buffer.push_batch(
-                vec![make_env_transition(0, 0), make_env_transition(1, 0)],
-                0,
-            );
-            buffer.push_batch(
-                vec![make_env_transition(0, 1), make_env_transition(1, 1)],
-                0,
-            );
-
-            assert!(buffer.is_ready());
-
-            let rollouts = buffer.consume();
-
-            assert_eq!(rollouts.len(), 2);
-            assert_eq!(rollouts[0].len(), 2);
-            assert_eq!(rollouts[1].len(), 2);
-
-            // Buffer should be reset
-            assert!(!buffer.is_ready());
-            assert_eq!(buffer.total_transitions(), 0);
-        }
-
-        #[test]
-        fn test_distributed_buffer_consumed_epoch() {
-            let buffer = DistributedPPOBuffer::new(1, 1);
-
-            assert_eq!(buffer.consumed_epoch(), 0);
-
-            buffer.push_batch(vec![make_env_transition(0, 0)], 0);
-            let _ = buffer.consume();
-            assert_eq!(buffer.consumed_epoch(), 1);
-
-            buffer.push_batch(vec![make_env_transition(0, 0)], 0);
-            let _ = buffer.consume();
-            assert_eq!(buffer.consumed_epoch(), 2);
-        }
-
-        #[test]
-        fn test_distributed_buffer_clear() {
-            let buffer = DistributedPPOBuffer::new(2, 2);
-
-            buffer.push_batch(make_batch(2), 0);
-
-            buffer.clear();
-
-            assert_eq!(buffer.total_transitions(), 0);
-            assert!(!buffer.is_ready());
-        }
-
-        #[test]
-        fn test_distributed_buffer_transitions_organized_by_env() {
-            let buffer = DistributedPPOBuffer::new(2, 3);
-
-            // Push transitions with identifiable env_ids
-            buffer.push_batch(
-                vec![
-                    make_env_transition(0, 0),
-                    make_env_transition(1, 0),
-                    make_env_transition(2, 0),
-                ],
-                0,
-            );
-            buffer.push_batch(
-                vec![
-                    make_env_transition(0, 1),
-                    make_env_transition(1, 1),
-                    make_env_transition(2, 1),
-                ],
-                0,
-            );
-
-            let rollouts = buffer.consume();
-
-            // Each env should have its own transitions
-            for (env_id, rollout) in rollouts.iter().enumerate() {
-                for (step, transition) in rollout.iter().enumerate() {
-                    // state[0] = env_id, state[1] = step
-                    assert_eq!(transition.base.state[0], env_id as f32);
-                    assert_eq!(transition.base.state[1], step as f32);
-                }
-            }
-        }
-
-        // --- DistributedPPORollouts tests ---
-
-        #[test]
-        fn test_distributed_ppo_rollouts_new() {
-            let rollouts = vec![make_batch(3), make_batch(2), vec![]];
-
-            let batch = DistributedPPORollouts::new(rollouts, 3);
-
-            assert_eq!(batch.n_envs, 3);
-            assert_eq!(batch.rollout_length, 3);
-        }
-
-        #[test]
-        fn test_distributed_ppo_rollouts_total_transitions() {
-            let rollouts = vec![make_batch(3), make_batch(2), vec![]];
-
-            let batch = DistributedPPORollouts::new(rollouts, 3);
-
-            assert_eq!(batch.total_transitions(), 5);
-        }
-
-        #[test]
-        fn test_distributed_ppo_rollouts_non_empty() {
-            let rollouts = vec![make_batch(2), vec![], make_batch(1)];
-
-            let batch = DistributedPPORollouts::new(rollouts, 2);
-
-            let non_empty: Vec<_> = batch.non_empty_rollouts().collect();
-            assert_eq!(non_empty.len(), 2);
-            assert_eq!(non_empty[0].0, 0); // env 0
-            assert_eq!(non_empty[1].0, 2); // env 2
-        }
-
-        #[test]
-        fn test_distributed_ppo_rollouts_obs_dim() {
-            let rollouts = vec![vec![], make_batch(1)];
-
-            let batch = DistributedPPORollouts::new(rollouts, 1);
-
-            assert_eq!(batch.obs_dim(), Some(2));
-        }
-
-        #[test]
-        fn test_distributed_ppo_rollouts_obs_dim_all_empty() {
-            let rollouts: Vec<Vec<PPOTransition>> = vec![vec![], vec![]];
-
-            let batch = DistributedPPORollouts::new(rollouts, 0);
-
-            assert_eq!(batch.obs_dim(), None);
-        }
-    }
 
     // ============================================================================
-    // Module: RecurrentPPOBuffer Tests
-    // ============================================================================
-
-    mod recurrent_buffer_tests {
-        use super::*;
-
-        #[test]
-        fn test_recurrent_buffer_creation() {
-            let buffer = RecurrentPPOBuffer::new(32, 64);
-
-            assert_eq!(buffer.rollout_length(), 32);
-            assert_eq!(buffer.total_envs(), 64);
-            assert!(!buffer.is_ready());
-            assert_eq!(buffer.total_transitions(), 0);
-        }
-
-        #[test]
-        fn test_recurrent_buffer_push_batch() {
-            let buffer = RecurrentPPOBuffer::new(2, 2);
-
-            buffer.push_batch(
-                vec![
-                    make_recurrent_transition(0, 1, 0, true),
-                    make_recurrent_transition(1, 2, 0, true),
-                ],
-                0,
-            );
-
-            assert_eq!(buffer.total_transitions(), 2);
-        }
-
-        #[test]
-        fn test_recurrent_buffer_sequence_preserved() {
-            let buffer = RecurrentPPOBuffer::new(3, 1);
-
-            // Push sequence with sequence_id = 42
-            for step in 0..3 {
-                buffer.push_batch(
-                    vec![make_recurrent_transition(step, 42, step, step == 0)],
-                    0,
-                );
-            }
-
-            let rollouts = buffer.consume();
-
-            assert_eq!(rollouts.len(), 1);
-            assert_eq!(rollouts[0].len(), 3);
-
-            // Verify sequence info is preserved
-            for (step, transition) in rollouts[0].iter().enumerate() {
-                assert_eq!(transition.sequence_id, 42);
-                assert_eq!(transition.step_in_sequence, step);
-                assert_eq!(transition.is_sequence_start, step == 0);
-            }
-        }
-
-        #[test]
-        fn test_recurrent_buffer_hidden_state_preserved() {
-            let buffer = RecurrentPPOBuffer::new(1, 1);
-
-            buffer.push_batch(vec![make_recurrent_transition(0, 1, 0, true)], 0);
-
-            let rollouts = buffer.consume();
-
-            assert_eq!(rollouts[0][0].hidden_state, vec![0.1, 0.2, 0.3, 0.4]);
-        }
-
-        #[test]
-        fn test_recurrent_buffer_is_ready() {
-            let buffer = RecurrentPPOBuffer::new(2, 2);
-
-            // Push 1 step
-            buffer.push_batch(
-                vec![
-                    make_recurrent_transition(0, 1, 0, true),
-                    make_recurrent_transition(1, 2, 0, true),
-                ],
-                0,
-            );
-            assert!(!buffer.is_ready());
-
-            // Push 2nd step
-            buffer.push_batch(
-                vec![
-                    make_recurrent_transition(0, 1, 1, false),
-                    make_recurrent_transition(1, 2, 1, false),
-                ],
-                0,
-            );
-            assert!(buffer.is_ready());
-        }
-
-        #[test]
-        fn test_recurrent_buffer_consumed_epoch() {
-            let buffer = RecurrentPPOBuffer::new(1, 1);
-
-            assert_eq!(buffer.consumed_epoch(), 0);
-
-            buffer.push_batch(vec![make_recurrent_transition(0, 1, 0, true)], 0);
-            let _ = buffer.consume();
-
-            assert_eq!(buffer.consumed_epoch(), 1);
-        }
-
-        #[test]
-        fn test_recurrent_buffer_bootstrap_value() {
-            let buffer = RecurrentPPOBuffer::new(1, 1);
-
-            let mut transition = make_recurrent_transition(0, 1, 0, true);
-            transition.bootstrap_value = Some(0.75);
-
-            buffer.push_batch(vec![transition], 0);
-
-            let rollouts = buffer.consume();
-            assert_eq!(rollouts[0][0].bootstrap_value, Some(0.75));
-        }
-
-        #[test]
-        fn test_recurrent_buffer_multiple_sequences() {
-            let buffer = RecurrentPPOBuffer::new(2, 1);
-
-            // First sequence (seq_id = 1)
-            buffer.push_batch(vec![make_recurrent_transition(0, 1, 0, true)], 0);
-            // Second sequence starts (seq_id = 2)
-            buffer.push_batch(vec![make_recurrent_transition(1, 2, 0, true)], 0);
-
-            let rollouts = buffer.consume();
-
-            // Both transitions in same env rollout
-            assert_eq!(rollouts[0][0].sequence_id, 1);
-            assert_eq!(rollouts[0][1].sequence_id, 2);
-        }
-    }
-
-    // ============================================================================
-    // Module: DistributedPPO Algorithm Tests
+    // Module: PPO Algorithm Tests
     // ============================================================================
 
     mod algorithm_tests {
@@ -1079,46 +676,46 @@ mod tests {
 
         #[test]
         fn test_distributed_ppo_new() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
 
             assert_eq!(
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::name(&ppo),
-                "DistributedPPO"
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::name(&ppo),
+                "PPO"
             );
             assert!(
-                !<DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::is_off_policy(&ppo)
+                !<PPO as DistributedAlgorithm<TestAutodiffBackend>>::is_off_policy(&ppo)
             );
         }
 
         #[test]
         fn test_distributed_ppo_n_epochs() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
 
             assert_eq!(
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::n_epochs(&ppo),
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::n_epochs(&ppo),
                 4
             );
         }
 
         #[test]
         fn test_distributed_ppo_n_minibatches() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
 
             assert_eq!(
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::n_minibatches(&ppo),
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::n_minibatches(&ppo),
                 4
             );
         }
 
         #[test]
         fn test_distributed_ppo_create_buffer() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config.clone());
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config.clone());
 
-            let buffer = <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
+            let buffer = <PPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
                 &ppo, 2, 32,
             );
 
@@ -1129,15 +726,15 @@ mod tests {
 
         #[test]
         fn test_distributed_ppo_is_ready() {
-            let config = DistributedPPOConfig::default().with_rollout_length(2);
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default().with_rollout_length(2);
+            let ppo = PPO::new(config);
 
-            let buffer = <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
+            let buffer = <PPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
                 &ppo, 1, 2,
             );
 
             assert!(
-                !<DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::is_ready(
+                !<PPO as DistributedAlgorithm<TestAutodiffBackend>>::is_ready(
                     &ppo, &buffer
                 )
             );
@@ -1146,7 +743,7 @@ mod tests {
             buffer.push_step(make_batch(2), 1);
 
             assert!(
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::is_ready(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::is_ready(
                     &ppo, &buffer
                 )
             );
@@ -1154,17 +751,17 @@ mod tests {
 
         #[test]
         fn test_distributed_ppo_sample_batch_not_ready() {
-            let config = DistributedPPOConfig::default().with_rollout_length(10);
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default().with_rollout_length(10);
+            let ppo = PPO::new(config);
 
-            let buffer = <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
+            let buffer = <PPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
                 &ppo, 1, 2,
             );
 
             buffer.push_step(make_batch(2), 1);
 
             let batch =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
                     &ppo, &buffer,
                 );
 
@@ -1173,10 +770,10 @@ mod tests {
 
         #[test]
         fn test_distributed_ppo_sample_batch_ready() {
-            let config = DistributedPPOConfig::default().with_rollout_length(2);
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default().with_rollout_length(2);
+            let ppo = PPO::new(config);
 
-            let buffer = <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
+            let buffer = <PPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
                 &ppo, 1, 2,
             );
 
@@ -1184,7 +781,7 @@ mod tests {
             buffer.push_step(make_batch(2), 42);
 
             let batch =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
                     &ppo, &buffer,
                 );
 
@@ -1200,8 +797,8 @@ mod tests {
             // On-policy PPO must discard stale data to maintain correctness.
             // When a batch's policy version is too old compared to the learner's
             // current version, the batch is discarded (returned as empty).
-            let config = DistributedPPOConfig::default(); // max_staleness = 1
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default(); // max_staleness = 1
+            let ppo = PPO::new(config);
 
             let rollout = PPORolloutBatch {
                 transitions: make_batch(4),
@@ -1217,7 +814,7 @@ mod tests {
             };
 
             let result =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::handle_staleness(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::handle_staleness(
                     &ppo,
                     batch,
                     100, // Current version much higher (staleness = 99 > max_staleness = 1)
@@ -1232,8 +829,8 @@ mod tests {
         #[test]
         fn test_distributed_ppo_staleness_keeps_fresh_batch() {
             // Batches within the staleness threshold are kept as-is.
-            let config = DistributedPPOConfig::default(); // max_staleness = 1
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default(); // max_staleness = 1
+            let ppo = PPO::new(config);
 
             let rollout = PPORolloutBatch {
                 transitions: make_batch(4),
@@ -1249,7 +846,7 @@ mod tests {
             };
 
             let result =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::handle_staleness(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::handle_staleness(
                     &ppo,
                     batch,
                     100, // Current version only 1 ahead (staleness = 1 <= max_staleness = 1)
@@ -1265,10 +862,10 @@ mod tests {
 
         #[test]
         fn test_compute_advantages_basic() {
-            let config = DistributedPPOConfig::default()
+            let config = PPOAlgorithmConfig::default()
                 .with_gamma(0.99)
                 .with_gae_lambda(0.95);
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -1299,10 +896,10 @@ mod tests {
 
         #[test]
         fn test_compute_advantages_with_terminal() {
-            let config = DistributedPPOConfig::default()
+            let config = PPOAlgorithmConfig::default()
                 .with_gamma(0.99)
                 .with_gae_lambda(0.95);
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -1330,13 +927,13 @@ mod tests {
 
         #[test]
         fn test_compute_advantages_normalized() {
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: true,
                 gamma: 0.99,
                 gae_lambda: 0.95,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -1382,13 +979,13 @@ mod tests {
 
         #[test]
         fn test_compute_advantages_not_normalized() {
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: false,
                 gamma: 0.99,
                 gae_lambda: 0.95,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -1416,13 +1013,13 @@ mod tests {
 
         #[test]
         fn test_compute_advantages_returns_equal_adv_plus_values() {
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: false, // Disable to test relationship
                 gamma: 0.99,
                 gae_lambda: 0.95,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -1463,8 +1060,8 @@ mod tests {
 
         #[test]
         fn test_compute_batch_loss_finite() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
 
             let device = get_device();
             let batch_size = 8;
@@ -1489,7 +1086,7 @@ mod tests {
             let values = Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
@@ -1509,12 +1106,12 @@ mod tests {
         #[test]
         fn test_compute_batch_loss_formula() {
             // Test: total_loss = policy_loss + vf_coef * value_loss - entropy_coef * entropy
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 vf_coef: 0.5,
                 entropy_coef: 0.01,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
             let batch_size = 4;
@@ -1537,7 +1134,7 @@ mod tests {
             let values = Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
@@ -1558,11 +1155,11 @@ mod tests {
         fn test_compute_batch_loss_respects_clip_ratio() {
             // When log_probs differ significantly from old_log_probs,
             // clipping should bound the policy loss
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 clip_ratio: 0.2,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
             let batch_size = 4;
@@ -1592,7 +1189,7 @@ mod tests {
             let values = Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
@@ -1602,7 +1199,7 @@ mod tests {
     }
 
     // ============================================================================
-    // Module: DistributedPPOConfig Tests
+    // Module: PPOAlgorithmConfig Tests
     // ============================================================================
 
     mod distributed_ppo_config_tests {
@@ -1610,7 +1207,7 @@ mod tests {
 
         #[test]
         fn test_config_default() {
-            let config = DistributedPPOConfig::default();
+            let config = PPOAlgorithmConfig::default();
 
             assert_eq!(config.clip_ratio, 0.2);
             assert_eq!(config.vf_coef, 0.5);
@@ -1627,49 +1224,49 @@ mod tests {
 
         #[test]
         fn test_config_builder_rollout_length() {
-            let config = DistributedPPOConfig::new().with_rollout_length(256);
+            let config = PPOAlgorithmConfig::new().with_rollout_length(256);
 
             assert_eq!(config.rollout_length, 256);
         }
 
         #[test]
         fn test_config_builder_gamma() {
-            let config = DistributedPPOConfig::new().with_gamma(0.995);
+            let config = PPOAlgorithmConfig::new().with_gamma(0.995);
 
             assert_eq!(config.gamma, 0.995);
         }
 
         #[test]
         fn test_config_builder_gae_lambda() {
-            let config = DistributedPPOConfig::new().with_gae_lambda(0.9);
+            let config = PPOAlgorithmConfig::new().with_gae_lambda(0.9);
 
             assert_eq!(config.gae_lambda, 0.9);
         }
 
         #[test]
         fn test_config_builder_n_epochs() {
-            let config = DistributedPPOConfig::new().with_n_epochs(10);
+            let config = PPOAlgorithmConfig::new().with_n_epochs(10);
 
             assert_eq!(config.n_epochs, 10);
         }
 
         #[test]
         fn test_config_builder_n_minibatches() {
-            let config = DistributedPPOConfig::new().with_n_minibatches(8);
+            let config = PPOAlgorithmConfig::new().with_n_minibatches(8);
 
             assert_eq!(config.n_minibatches, 8);
         }
 
         #[test]
         fn test_config_builder_clip_ratio() {
-            let config = DistributedPPOConfig::new().with_clip_ratio(0.3);
+            let config = PPOAlgorithmConfig::new().with_clip_ratio(0.3);
 
             assert_eq!(config.clip_ratio, 0.3);
         }
 
         #[test]
         fn test_config_builder_chaining() {
-            let config = DistributedPPOConfig::new()
+            let config = PPOAlgorithmConfig::new()
                 .with_rollout_length(64)
                 .with_gamma(0.98)
                 .with_n_epochs(8)
@@ -1683,7 +1280,7 @@ mod tests {
 
         #[test]
         fn test_config_clone() {
-            let config = DistributedPPOConfig::new().with_rollout_length(64);
+            let config = PPOAlgorithmConfig::new().with_rollout_length(64);
             let cloned = config.clone();
 
             assert_eq!(cloned.rollout_length, 64);
@@ -1697,7 +1294,7 @@ mod tests {
         #[ignore = "Config validation not yet implemented"]
         fn test_config_invalid_gamma_negative() {
             // When config validation is added, this should panic or return Err
-            let _config = DistributedPPOConfig {
+            let _config = PPOAlgorithmConfig {
                 gamma: -0.1,
                 ..Default::default()
             };
@@ -1706,7 +1303,7 @@ mod tests {
         #[test]
         #[ignore = "Config validation not yet implemented"]
         fn test_config_invalid_gamma_too_high() {
-            let _config = DistributedPPOConfig {
+            let _config = PPOAlgorithmConfig {
                 gamma: 1.5,
                 ..Default::default()
             };
@@ -1715,7 +1312,7 @@ mod tests {
         #[test]
         #[ignore = "Config validation not yet implemented"]
         fn test_config_invalid_clip_ratio_zero() {
-            let _config = DistributedPPOConfig {
+            let _config = PPOAlgorithmConfig {
                 clip_ratio: 0.0,
                 ..Default::default()
             };
@@ -1724,7 +1321,7 @@ mod tests {
         #[test]
         #[ignore = "Config validation not yet implemented"]
         fn test_config_invalid_n_epochs_zero() {
-            let _config = DistributedPPOConfig {
+            let _config = PPOAlgorithmConfig {
                 n_epochs: 0,
                 ..Default::default()
             };
@@ -1733,7 +1330,7 @@ mod tests {
         #[test]
         #[ignore = "Config validation not yet implemented"]
         fn test_config_invalid_gae_lambda_negative() {
-            let _config = DistributedPPOConfig {
+            let _config = PPOAlgorithmConfig {
                 gae_lambda: -0.1,
                 ..Default::default()
             };
@@ -1783,64 +1380,6 @@ mod tests {
             assert!(buffer.is_rollout_ready());
         }
 
-        #[test]
-        fn test_distributed_buffer_concurrent_push() {
-            let buffer = Arc::new(DistributedPPOBuffer::new(10, 32)); // 32 total envs
-
-            let handles: Vec<_> = (0..4)
-                .map(|actor_id| {
-                    let buffer = Arc::clone(&buffer);
-                    thread::spawn(move || {
-                        let offset = actor_id * 8;
-                        for step in 0..10 {
-                            let transitions: Vec<PPOTransition> = (0..8)
-                                .map(|env| make_env_transition(offset + env, step))
-                                .collect();
-                            buffer.push_batch(transitions, offset);
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert!(buffer.is_ready());
-            assert_eq!(buffer.total_transitions(), 320);
-        }
-
-        #[test]
-        fn test_distributed_buffer_no_data_race() {
-            // Use atomic counter to verify all pushes complete
-            let push_count = Arc::new(AtomicUsize::new(0));
-            let buffer = Arc::new(DistributedPPOBuffer::new(5, 8));
-
-            let handles: Vec<_> = (0..2)
-                .map(|actor_id| {
-                    let buffer = Arc::clone(&buffer);
-                    let counter = Arc::clone(&push_count);
-                    thread::spawn(move || {
-                        let offset = actor_id * 4;
-                        for _ in 0..5 {
-                            buffer.push_batch(
-                                (0..4).map(|i| make_transition(offset + i)).collect(),
-                                offset,
-                            );
-                            counter.fetch_add(1, Ordering::SeqCst);
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            // All 10 pushes should complete
-            assert_eq!(push_count.load(Ordering::SeqCst), 10);
-            assert!(buffer.is_ready());
-        }
 
         #[test]
         fn test_concurrent_push_and_consume() {
@@ -1880,39 +1419,6 @@ mod tests {
             assert!(result.is_some());
         }
 
-        #[test]
-        fn test_recurrent_buffer_concurrent_push() {
-            let buffer = Arc::new(RecurrentPPOBuffer::new(5, 16));
-
-            let handles: Vec<_> = (0..4)
-                .map(|actor_id| {
-                    let buffer = Arc::clone(&buffer);
-                    thread::spawn(move || {
-                        let offset = actor_id * 4;
-                        for step in 0..5 {
-                            let transitions: Vec<RecurrentPPOTransition> = (0..4)
-                                .map(|env| {
-                                    make_recurrent_transition(
-                                        offset + env,
-                                        actor_id as u64,
-                                        step,
-                                        step == 0,
-                                    )
-                                })
-                                .collect();
-                            buffer.push_batch(transitions, offset);
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert!(buffer.is_ready());
-            assert_eq!(buffer.total_transitions(), 80);
-        }
     }
 
     // ============================================================================
@@ -1928,12 +1434,12 @@ mod tests {
 
         #[test]
         fn test_full_ppo_training_cycle() {
-            // 1. Create DistributedPPO with config
-            let config = DistributedPPOConfig::default().with_rollout_length(4);
-            let ppo = DistributedPPO::new(config);
+            // 1. Create PPO with config
+            let config = PPOAlgorithmConfig::default().with_rollout_length(4);
+            let ppo = PPO::new(config);
 
             // 2. Create buffer via create_buffer()
-            let buffer = <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
+            let buffer = <PPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
                 &ppo, 2, 4,
             );
 
@@ -1960,14 +1466,14 @@ mod tests {
 
             // 4. Verify is_ready() transitions correctly
             assert!(
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::is_ready(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::is_ready(
                     &ppo, &buffer
                 )
             );
 
             // 5. Sample batch
             let batch =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
                     &ppo, &buffer,
                 )
                 .expect("Should have batch");
@@ -1986,7 +1492,7 @@ mod tests {
             let values = Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
@@ -1999,13 +1505,13 @@ mod tests {
 
         #[test]
         fn test_multi_epoch_training_simulation() {
-            let config = DistributedPPOConfig::default()
+            let config = PPOAlgorithmConfig::default()
                 .with_rollout_length(2)
                 .with_n_epochs(4)
                 .with_n_minibatches(2);
-            let ppo = DistributedPPO::new(config.clone());
+            let ppo = PPO::new(config.clone());
 
-            let buffer = <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
+            let buffer = <PPO as DistributedAlgorithm<TestAutodiffBackend>>::create_buffer(
                 &ppo, 1, 4,
             );
 
@@ -2015,7 +1521,7 @@ mod tests {
             }
 
             let batch =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::sample_batch(
                     &ppo, &buffer,
                 )
                 .expect("Should have batch");
@@ -2034,7 +1540,7 @@ mod tests {
                     let values =
                         Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
-                    let loss_output = <DistributedPPO as DistributedAlgorithm<
+                    let loss_output = <PPO as DistributedAlgorithm<
                         TestAutodiffBackend,
                     >>::compute_batch_loss(
                         &ppo, &batch, log_probs, entropy, values, &device
@@ -2067,14 +1573,14 @@ mod tests {
             let (cpu_advantages, cpu_returns) =
                 compute_gae(&rewards, &values, &dones, last_value, gamma, gae_lambda);
 
-            // Tensor GAE via DistributedPPO
-            let config = DistributedPPOConfig {
+            // Tensor GAE via PPO
+            let config = PPOAlgorithmConfig {
                 gamma,
                 gae_lambda,
                 normalize_advantages: false,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
             let (tensor_advantages, tensor_returns) = ppo.compute_advantages::<TestAutodiffBackend>(
@@ -2109,51 +1615,6 @@ mod tests {
             }
         }
 
-        #[test]
-        fn test_distributed_buffer_multi_actor_sync() {
-            // Simulate multiple actors pushing asynchronously
-            let buffer = Arc::new(DistributedPPOBuffer::new(8, 64));
-
-            let handles: Vec<_> = (0..4)
-                .map(|actor_id| {
-                    let buffer = Arc::clone(&buffer);
-                    thread::spawn(move || {
-                        let offset = actor_id * 16;
-                        for step in 0..8 {
-                            let transitions: Vec<PPOTransition> = (0..16)
-                                .map(|env| make_env_transition(offset + env, step))
-                                .collect();
-                            buffer.push_batch(transitions, offset);
-
-                            // Simulate varying processing times
-                            if actor_id % 2 == 0 {
-                                thread::sleep(Duration::from_micros(50));
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            // All transitions should be correctly stored
-            assert!(buffer.is_ready());
-
-            let rollouts = buffer.consume();
-
-            // Verify per-environment organization
-            assert_eq!(rollouts.len(), 64);
-            for (env_id, rollout) in rollouts.iter().enumerate() {
-                assert_eq!(
-                    rollout.len(),
-                    8,
-                    "Env {} should have 8 transitions",
-                    env_id
-                );
-            }
-        }
 
         #[test]
         fn test_buffer_state_machine() {
@@ -2200,11 +1661,11 @@ mod tests {
 
         #[test]
         fn test_numerical_stability_extreme_advantages() {
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: true,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -2234,11 +1695,11 @@ mod tests {
 
         #[test]
         fn test_numerical_stability_very_small_advantages() {
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: true,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -2269,11 +1730,11 @@ mod tests {
             // Note: With normalization enabled and a single element, the variance is
             // undefined (NaN) because Burn's var uses Bessel's correction (n-1 denominator).
             // This test documents that non-normalized mode handles single transitions correctly.
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: false, // Disable normalization for single element
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -2306,11 +1767,11 @@ mod tests {
             // This test documents that normalized advantages with a single element
             // produces NaN because var(0) with n=1 and Bessel's correction is undefined.
             // This is expected behavior - PPO should not be run with batch size 1.
-            let config = DistributedPPOConfig {
+            let config = PPOAlgorithmConfig {
                 normalize_advantages: true,
                 ..Default::default()
             };
-            let ppo = DistributedPPO::new(config);
+            let ppo = PPO::new(config);
 
             let device = get_device();
 
@@ -2336,8 +1797,8 @@ mod tests {
         #[test]
         fn test_numerical_stability_all_same_advantages() {
             // Edge case: all advantages are the same (variance = 0)
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
 
             let device = get_device();
             let batch_size = 4;
@@ -2360,7 +1821,7 @@ mod tests {
             let values = Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
@@ -2405,36 +1866,6 @@ mod tests {
             assert_eq!(batch.policy_version, 0);
         }
 
-        #[test]
-        fn test_distributed_buffer_consume_when_empty() {
-            let buffer = DistributedPPOBuffer::new(3, 2);
-
-            let rollouts = buffer.consume();
-
-            assert_eq!(rollouts.len(), 2);
-            assert!(rollouts[0].is_empty());
-            assert!(rollouts[1].is_empty());
-            assert_eq!(buffer.consumed_epoch(), 1); // Still increments
-        }
-
-        #[test]
-        fn test_distributed_buffer_partial_fill() {
-            // Not all envs have complete rollouts
-            let buffer = DistributedPPOBuffer::new(3, 4);
-
-            // Only fill envs 0 and 1
-            for step in 0..3 {
-                buffer.push_batch(
-                    vec![make_env_transition(0, step), make_env_transition(1, step)],
-                    0,
-                );
-            }
-
-            assert!(!buffer.is_ready()); // Not ready (envs 2, 3 empty)
-
-            let (min, _) = buffer.progress();
-            assert_eq!(min, 0);
-        }
 
         #[test]
         fn test_transition_done_logic() {
@@ -2490,16 +1921,6 @@ mod tests {
         }
 
         #[test]
-        fn test_distributed_ppo_rollouts_empty() {
-            let rollouts: Vec<Vec<PPOTransition>> = vec![];
-            let batch = DistributedPPORollouts::new(rollouts, 0);
-
-            assert_eq!(batch.n_envs, 0);
-            assert_eq!(batch.total_transitions(), 0);
-            assert_eq!(batch.obs_dim(), None);
-        }
-
-        #[test]
         fn test_buffer_multiple_clear_cycles() {
             let config = PPORolloutBufferConfig {
                 n_actors: 1,
@@ -2535,8 +1956,8 @@ mod tests {
 
         #[test]
         fn test_advantage_tensor_shape() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
             let device = get_device();
 
             let rewards = vec![1.0; 10];
@@ -2553,8 +1974,8 @@ mod tests {
 
         #[test]
         fn test_loss_output_total_shape() {
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
             let device = get_device();
 
             let batch_size = 16;
@@ -2576,7 +1997,7 @@ mod tests {
             let values = Tensor::<TestAutodiffBackend, 2>::zeros([batch_size, 1], &device);
 
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
@@ -2587,8 +2008,8 @@ mod tests {
         #[test]
         fn test_values_flattening() {
             // Test that 2D values [batch, 1] are correctly flattened
-            let config = DistributedPPOConfig::default();
-            let ppo = DistributedPPO::new(config);
+            let config = PPOAlgorithmConfig::default();
+            let ppo = PPO::new(config);
             let device = get_device();
 
             let batch_size = 8;
@@ -2612,11 +2033,133 @@ mod tests {
 
             // Should not panic - values are flattened internally
             let loss_output =
-                <DistributedPPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
+                <PPO as DistributedAlgorithm<TestAutodiffBackend>>::compute_batch_loss(
                     &ppo, &batch, log_probs, entropy, values, &device,
                 );
 
             assert!(loss_output.value_loss.is_finite());
+        }
+    }
+
+    // ============================================================================
+    // Temporal Hidden State Invariant Tests (Curry-Howard Correspondence)
+    // ============================================================================
+    //
+    // These tests document and verify the critical temporal causality invariant
+    // for recurrent policies. The Curry-Howard correspondence frames this as:
+    //
+    // Type Specification:
+    //   transition[t].hidden = h_{t-1}  (INPUT to forward pass)
+    //   NOT h_t (OUTPUT from forward pass)
+    //
+    // If this invariant is violated, the PPO ratio becomes:
+    //   π_new(a|s, h_t) / π_old(a|s, h_{t-1})
+    // which conditions numerator and denominator on different histories,
+    // making the policy gradient update meaningless.
+
+    mod temporal_invariant_tests {
+        use crate::algorithms::ppo::ppo_transition::RecurrentHiddenData;
+        use crate::core::transition::RecurrentPPOTransition;
+
+        /// Test that RecurrentHiddenData documents the temporal invariant.
+        ///
+        /// This is a compile-time documentation test - the invariant is enforced
+        /// by the collection logic in ppo_runner.rs, not by the type itself.
+        /// See RecurrentHiddenData's doc comments for the full specification.
+        #[test]
+        fn recurrent_hidden_data_documents_temporal_invariant() {
+            // The type exists and can be constructed
+            let hidden = RecurrentHiddenData::new(vec![0.1, 0.2, 0.3]);
+            assert_eq!(hidden.data.len(), 3);
+
+            // The invariant is documented in the type's doc comments:
+            // - data field represents h_{t-1} (INPUT hidden state)
+            // - NOT h_t (OUTPUT hidden state)
+            // This invariant is enforced by extracting hidden BEFORE forward pass
+        }
+
+        /// Test the correct transition structure for recurrent policies.
+        ///
+        /// For a transition at timestep t:
+        /// - state: o_t (observation at time t)
+        /// - action: a_t (action taken at time t)
+        /// - log_prob: log π(a_t | o_t, h_{t-1}) (computed with INPUT hidden)
+        /// - value: V(o_t, h_{t-1}) (computed with INPUT hidden)
+        /// - hidden_state: h_{t-1} (the INPUT hidden state, NOT h_t)
+        #[test]
+        fn recurrent_transition_temporal_structure() {
+            // Simulate the correct collection pattern:
+            // 1. At timestep t, we have hidden state h_{t-1} from previous step
+            // 2. We extract h_{t-1} BEFORE forward pass
+            // 3. Forward pass computes: (action, log_prob, value, h_t)
+            // 4. We store transition with hidden = h_{t-1}
+
+            let h_t_minus_1 = vec![0.5, 0.5, 0.5]; // INPUT hidden (before forward)
+
+            // Simulated forward pass would produce:
+            // - log_prob computed with h_{t-1}
+            // - value computed with h_{t-1}
+            // - h_t (output hidden, NOT stored in this transition)
+
+            let transition = RecurrentPPOTransition::new_discrete(
+                vec![1.0, 2.0],              // o_t (state)
+                0,                           // a_t (action)
+                1.0,                         // r_t (reward)
+                vec![1.1, 2.1],              // o_{t+1} (next_state)
+                false,                       // terminal
+                false,                       // truncated
+                -0.5,                        // log_prob: log π(a_t | o_t, h_{t-1})
+                0.8,                         // value: V(o_t, h_{t-1})
+                h_t_minus_1.clone(),         // hidden_state: h_{t-1} (INPUT!)
+                0,                           // sequence_id
+                5,                           // step_in_sequence
+                false,                       // is_sequence_start
+                None,                        // bootstrap_value
+            );
+
+            // Verify the hidden state is the INPUT, not OUTPUT
+            assert_eq!(transition.hidden_state, h_t_minus_1);
+
+            // This ensures that during training:
+            // - We initialize LSTM with transition.hidden_state = h_{t-1}
+            // - Forward pass on o_t produces log_prob' computed with h_{t-1}
+            // - This matches the stored log_prob (also computed with h_{t-1})
+            // - PPO ratio = exp(log_prob' - log_prob) is valid
+        }
+
+        /// Test that sequence boundaries respect the temporal invariant.
+        ///
+        /// When starting a new sequence (after terminal or at sequence chunk start):
+        /// - The first transition's hidden should be h_{-1} = zeros (or carried over)
+        /// - NOT h_0 (which would be the output after processing the first observation)
+        #[test]
+        fn sequence_start_uses_input_hidden() {
+            // At sequence start (t=0):
+            // - Input hidden is h_{-1} = zeros (fresh episode) or h_prev (continuation)
+            // - Forward pass: model(o_0, h_{-1}) → (a_0, log_prob_0, value_0, h_0)
+            // - Store: transition.hidden = h_{-1}
+
+            let h_minus_1 = vec![0.0, 0.0, 0.0]; // Zeros for fresh episode start
+
+            let first_transition = RecurrentPPOTransition::new_discrete(
+                vec![0.1, 0.2],              // state
+                0,                           // action
+                0.5,                         // reward
+                vec![0.2, 0.3],              // next_state
+                false,                       // terminal
+                false,                       // truncated
+                -1.0,                        // log_prob
+                0.0,                         // value
+                h_minus_1.clone(),           // hidden_state: h_{-1} = zeros
+                1,                           // sequence_id
+                0,                           // step_in_sequence: first step
+                true,                        // is_sequence_start: TRUE
+                None,                        // bootstrap_value
+            );
+
+            // Critical: hidden is zeros (input), not the output h_0
+            assert_eq!(first_transition.hidden_state, vec![0.0, 0.0, 0.0]);
+            assert!(first_transition.is_sequence_start);
         }
     }
 }

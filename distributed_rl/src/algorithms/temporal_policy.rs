@@ -36,8 +36,14 @@ pub trait HiddenStateType<B: Backend>: Clone + Send + Default + 'static {
     /// Whether this is a "real" hidden state (vs unit type for feed-forward).
     fn is_stateful() -> bool;
 
+    /// Reset state for a single environment (for terminal states).
+    fn reset(&mut self, env_idx: usize, device: &B::Device);
+
     /// Reset states at specific environment indices (for terminal states).
     fn reset_indices(&mut self, indices: &[usize], device: &B::Device, config: &HiddenConfig);
+
+    /// Get hidden state for a single environment as a vector.
+    fn get_env_vec(&self, env_idx: usize) -> Vec<f32>;
 
     /// Flatten to vector for buffer storage.
     fn to_vec(&self) -> Vec<f32>;
@@ -93,8 +99,16 @@ impl<B: Backend> HiddenStateType<B> for () {
         false
     }
 
+    fn reset(&mut self, _env_idx: usize, _device: &B::Device) {
+        // No-op for stateless policy
+    }
+
     fn reset_indices(&mut self, _indices: &[usize], _device: &B::Device, _config: &HiddenConfig) {
         // No-op for stateless policy
+    }
+
+    fn get_env_vec(&self, _env_idx: usize) -> Vec<f32> {
+        Vec::new()
     }
 
     fn to_vec(&self) -> Vec<f32> {
@@ -292,10 +306,19 @@ impl<B: Backend> HiddenStateType<B> for RecurrentHidden<B> {
         true
     }
 
+    fn reset(&mut self, env_idx: usize, device: &B::Device) {
+        // Delegate to the inherent method
+        RecurrentHidden::reset(self, env_idx, device);
+    }
+
     fn reset_indices(&mut self, indices: &[usize], device: &B::Device, _config: &HiddenConfig) {
         for &idx in indices {
             self.reset(idx, device);
         }
+    }
+
+    fn get_env_vec(&self, env_idx: usize) -> Vec<f32> {
+        self.get(env_idx).to_vec()
     }
 
     fn to_vec(&self) -> Vec<f32> {

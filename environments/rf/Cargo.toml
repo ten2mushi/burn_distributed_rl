@@ -1,0 +1,43 @@
+[package]
+name = "rf_environment"
+version = "0.1.0"
+edition = "2021"
+description = "High-fidelity SIMD-optimized RF spectrum environment for reinforcement learning"
+authors = ["komorebi"]
+license = "MIT"
+
+[features]
+default = ["simd"]
+simd = []
+
+# Optional integration with distributed_rl training framework
+# Enable with: cargo build --features distributed-rl
+distributed-rl = ["dep:distributed_rl"]
+
+# Rendering features - enable visualization capabilities
+# Enable with: cargo build --features render
+render = ["dep:plotters", "dep:image"]
+render-terminal = []
+render-html = []
+render-realtime = ["render", "dep:minifb"]
+render-gif = ["render", "dep:gif"]
+
+[dependencies]
+fastrand = "2.0"
+
+# Optional: Enable distributed_rl integration
+distributed_rl = { path = "../../distributed_rl", optional = true }
+
+# Optional: Rendering dependencies
+plotters = { version = "0.3", optional = true, features = ["bitmap_encoder"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+minifb = { version = "0.27", optional = true }
+gif = { version = "0.13", optional = true }
+
+[dev-dependencies]
+approx = "0.5"
+
+[[example]]
+name = "passive_simulation"
+path = "examples/passive_simulation.rs"
+required-features = ["render", "render-realtime", "render-gif"]

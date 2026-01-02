@@ -8,19 +8,20 @@
 //! - `temporal_policy`: Feed-forward vs recurrent abstraction
 //! - `actor_critic`: Unified actor-critic model trait
 //! - `algorithm`: Algorithm trait for loss computation (PPO, A2C)
-//! - `distributed_algorithm`: Distributed algorithm trait with buffer management
-//! - `ppo`: Distributed PPO implementation
-//! - `impala`: Distributed IMPALA implementation
+//! - `core_algorithm`: Distributed algorithm trait with buffer management
+//! - `ppo`: PPO implementation
+//! - `impala`: IMPALA implementation
 
 pub mod action_policy;
 pub mod actor_critic;
 pub mod algorithm;
 pub mod continuous_policy;
-pub mod distributed_algorithm;
+pub mod core_algorithm;
 pub mod gae;
 pub mod impala;
 pub mod ppo;
 pub mod policy_loss;
+pub mod sac;
 pub mod temporal_policy;
 pub mod vtrace;
 
@@ -48,12 +49,20 @@ pub use actor_critic::{
 pub use algorithm::{
     Algorithm, LossOutput, PPOAlgorithm, PPOConfig, A2CAlgorithm, A2CConfig,
 };
-pub use distributed_algorithm::{
-    DistributedAlgorithm, DistributedPPOConfig,
-    OnPolicyDistributed, OffPolicyDistributed,
+pub use core_algorithm::{
+    DistributedAlgorithm, PPOAlgorithmConfig,
+    OnPolicy, OffPolicy,
 };
-pub use ppo::{DistributedPPO, PPORolloutBuffer, PPORolloutBufferConfig, PPORolloutBatch, PPOProcessedBatch};
+pub use ppo::{PPO, PPORolloutBuffer, PPORolloutBufferConfig, PPORolloutBatch, PPOProcessedBatch};
 pub use impala::{
-    DistributedIMPALA, IMPALABuffer, IMPALABufferConfig, IMPALABatch, IMPALAProcessedBatch,
+    IMPALA, IMPALABuffer, IMPALABufferConfig, IMPALABatch, IMPALAProcessedBatch,
     IMPALAConfig, IMPALAStats,
+};
+pub use sac::{
+    SAC, SACConfig, SACStats, SACBuffer, SACBufferConfig,
+    SACActor, SACActorOutput, SACActorTraining,
+    SACCritic, SACCriticOutput, SACCriticTraining,
+    SACTransition, SACTransitionTrait, SACBatch,
+    EntropyTuner, SACLossOutput,
+    sac_actor_loss, sac_critic_loss, sac_td_targets,
 };

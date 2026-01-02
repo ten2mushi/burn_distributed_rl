@@ -109,6 +109,11 @@ pub struct PPOTransition {
     pub log_prob: f32,
     /// Value estimate at state: V(s)
     pub value: f32,
+    /// Bootstrap value V(s_{t+1}) for truncated rollouts at boundaries.
+    /// Some(v) if this transition is at a rollout boundary and the episode
+    /// didn't truly terminate (truncated or ongoing).
+    /// None for mid-rollout transitions or true terminal states.
+    pub bootstrap_value: Option<f32>,
 }
 
 impl PPOTransition {
@@ -127,6 +132,27 @@ impl PPOTransition {
             base: Transition::new_discrete(state, action, reward, next_state, terminal, truncated),
             log_prob,
             value,
+            bootstrap_value: None,
+        }
+    }
+
+    /// Create a new PPO transition with discrete action and bootstrap value.
+    pub fn new_discrete_with_bootstrap(
+        state: Vec<f32>,
+        action: u32,
+        reward: f32,
+        next_state: Vec<f32>,
+        terminal: bool,
+        truncated: bool,
+        log_prob: f32,
+        value: f32,
+        bootstrap_value: Option<f32>,
+    ) -> Self {
+        Self {
+            base: Transition::new_discrete(state, action, reward, next_state, terminal, truncated),
+            log_prob,
+            value,
+            bootstrap_value,
         }
     }
 

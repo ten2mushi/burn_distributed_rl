@@ -244,6 +244,7 @@ mod tests {
                 ),
                 log_prob: -0.5,
                 value: 1.0,
+                bootstrap_value: None,
             })
             .collect()
     }
@@ -329,6 +330,7 @@ mod tests {
                     ),
                     log_prob: -0.5,
                     value: 1.0,
+                    bootstrap_value: None,
                 },
                 PPOTransition {
                     base: Transition::new_discrete(
@@ -337,6 +339,7 @@ mod tests {
                     ),
                     log_prob: -0.5,
                     value: 1.0,
+                    bootstrap_value: None,
                 },
             ];
             buffer.push_step(transitions);

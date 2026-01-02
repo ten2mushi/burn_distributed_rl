@@ -17,7 +17,7 @@ use burn::tensor::Tensor;
 use crate::algorithms::gae::{compute_gae, normalize_advantages};
 use crate::algorithms::vtrace::compute_vtrace;
 use crate::algorithms::policy_loss::{ppo_clip_loss_scalar, value_loss_scalar};
-use crate::algorithms::distributed_algorithm::DistributedPPOConfig;
+use crate::algorithms::core_algorithm::PPOAlgorithmConfig;
 use crate::algorithms::impala::IMPALAConfig;
 
 type TestBackend = Wgpu;
@@ -299,7 +299,7 @@ fn test_on_policy_gae_vtrace_similar_advantages() {
 /// Test PPO config default values.
 #[test]
 fn test_ppo_config_defaults() {
-    let config = DistributedPPOConfig::default();
+    let config = PPOAlgorithmConfig::default();
 
     assert_eq!(config.clip_ratio, 0.2);
     assert_eq!(config.vf_coef, 0.5);
@@ -328,7 +328,7 @@ fn test_impala_config_defaults() {
 /// Test PPO config builder pattern.
 #[test]
 fn test_ppo_config_builder() {
-    let config = DistributedPPOConfig::new()
+    let config = PPOAlgorithmConfig::new()
         .with_clip_ratio(0.1)
         .with_gamma(0.995)
         .with_gae_lambda(0.9)

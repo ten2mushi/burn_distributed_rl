@@ -16,11 +16,14 @@ rand = "0.8.5"
 crossbeam = "0.8"
 crossbeam-deque = "0.8"
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 parking_lot = "0.12"
 fastrand = "2.0"
 lazy_static = "1.4"
+log = "0.4"
 operant = { path = "../operant_fork/operant/crates/operant", default-features = false }
 operant-core = { path = "../operant_fork/operant/crates/operant-core" }
 
 [dev-dependencies]
 tempfile = "3.10"
+proptest = "1.4"
