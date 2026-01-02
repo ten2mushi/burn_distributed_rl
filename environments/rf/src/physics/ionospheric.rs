@@ -31,7 +31,7 @@
 use std::simd::{f32x8, num::SimdFloat};
 
 #[cfg(feature = "simd")]
-use crate::simd_rf::math::{simd_exp, simd_log, simd_sqrt, simd_cos, simd_sin};
+use crate::simd_rf::math::{simd_log, simd_sqrt};
 
 use crate::constants::PI;
 use crate::types::{
@@ -42,12 +42,6 @@ use crate::types::{
 // ============================================================================
 // Physical Constants
 // ============================================================================
-
-/// Earth radius in meters
-const EARTH_RADIUS_M: f32 = 6_371_000.0;
-
-/// Speed of light in m/s
-const C: f32 = 299_792_458.0;
 
 /// F2 layer height in meters (typical daytime)
 const F2_HEIGHT_DAY_M: f32 = 300_000.0;
@@ -386,7 +380,7 @@ pub fn muf_simd(distance_m: f32x8, fo_f2: f32x8, layer_height: f32x8) -> f32x8 {
 pub fn ionospheric_path_loss_simd(
     distance_m: f32x8,
     frequency_hz: f32x8,
-    fo_f2: f32x8,
+    _fo_f2: f32x8,
     layer_height: f32x8,
     d_layer_absorption: f32x8,
     is_day_mask: [bool; 8],

@@ -30,8 +30,6 @@ const H2O_RESONANCE_22: f32 = 22.235; // Primary H₂O line
 const H2O_RESONANCE_183: f32 = 183.31; // Strong H₂O line
 const H2O_RESONANCE_325: f32 = 325.15; // Additional H₂O line
 
-/// Default water vapor density (g/m³) - temperate climate
-const DEFAULT_WATER_VAPOR_DENSITY: f32 = 7.5;
 
 // ============================================================================
 // SIMD Atmospheric Models - Enhanced ITU-R P.676
